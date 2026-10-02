@@ -1,0 +1,6 @@
+.tools/obscura/
+tmp/
+node_modules/
+**/dist/
+.finleet/
+.playwright-mcp/

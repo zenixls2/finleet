@@ -1,0 +1,19 @@
+{
+  "name": "finleet-core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": { "finleet-core": "dist/cli.js" },
+  "exports": { ".": "./dist/index.js", "./testing": "./dist/testing.js" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test dist/*.test.js dist/**/*.test.js"
+  },
+  "dependencies": {
+    "@ai-sdk/anthropic": "^4.0.45",
+    "@ai-sdk/openai-compatible": "^3.0.40",
+    "ws": "^8.21.3",
+    "zod": "^4.5.4"
+  }
+}
