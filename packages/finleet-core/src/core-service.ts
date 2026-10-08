@@ -304,7 +304,7 @@ export class CoreService {
     }
     if (!this.hasSupportedFormat()) return failure("--format must be text or json");
 
-    const responses = providerName === "openai-responses";
+    const responses = providerName === "openai-responses" || providerName === "openai";
     const compatible = providerName !== "fake" && !responses;
     if (responses && !this.hasValidOpenAiResponsesArguments()) {
       return typedFailure(
@@ -535,7 +535,7 @@ export class CoreService {
     const providerName = option(this.options.args, "--provider");
     if (providerName === undefined || option(this.options.args, "--exchange") !== "paper" || selectedDelivery === undefined || input.prompt.trim().length === 0) return fail("PROMPT_INVALID", "Prompt submission is invalid");
     if (!this.hasSupportedFormat()) return fail("FORMAT_INVALID", "--format must be text or json");
-    const responses = providerName === "openai-responses";
+    const responses = providerName === "openai-responses" || providerName === "openai";
     const compatible = providerName !== "fake" && !responses;
     if (responses && !this.hasValidOpenAiResponsesArguments()) return fail("OPENAI_RESPONSES_ARGUMENT_INVALID", "OpenAI Responses model or reasoning configuration is invalid");
     const provider = await this.resolveProvider(providerName, responses, compatible);

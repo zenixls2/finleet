@@ -12,7 +12,7 @@ import { DEFAULT_AGENT_SELECTION_PROMPT, DEFAULT_SELECTED_AGENT_PROMPT } from ".
 
 const journal = (): string => join(mkdtempSync(join(tmpdir(), "finleet-responses-")), "journal.jsonl");
 const environment = (apiKey: string | undefined, authContent?: string, clientId?: string): Environment => ({ get: (name) => name === "OPENAI_API_KEY" ? apiKey : name === "FINLEET_AUTH_CONTENT" ? authContent : name === "FINLEET_OPENAI_CLIENT_ID" ? clientId : undefined });
-const command = (path: string, promptId = "prompt-1", prompt = "Hello World", authFile?: string): string[] => ["exec", prompt, "--provider", "openai-responses", "--model", "gpt-5.6-luna", "--reasoning-effort", "high", "--exchange", "paper", "--journal", path, "--session", "responses-1", "--prompt-id", promptId, "--format", "json", ...(authFile === undefined ? [] : ["--auth-file", authFile])];
+const command = (path: string, promptId = "prompt-1", prompt = "Hello World", authFile?: string, provider = "openai-responses"): string[] => ["exec", prompt, "--provider", provider, "--model", "gpt-5.6-luna", "--reasoning-effort", "high", "--exchange", "paper", "--journal", path, "--session", "responses-1", "--prompt-id", promptId, "--format", "json", ...(authFile === undefined ? [] : ["--auth-file", authFile])];
 const successFetch = (): OpenAiFetch => async () => ({ ok: true, status: 200, json: async () => ({ output: [{ type: "message", content: [{ type: "output_text", text: "Hello from Responses" }] }] }) });
 
 test("OpenAI login fails before network activity while CLIENT_ID is intentionally blank", async () => {
@@ -101,6 +101,19 @@ test("OpenAI Responses uses the fixed official request and produces one durable 
   assert.match(JSON.stringify(response.body), /Hello from Responses/);
   const retry = await execute(command(path), { environment: environment(undefined), openAiFetch: fetch });
   assert.equal(retry.exitCode, 0, JSON.stringify(retry.body)); assert.equal((retry.body as { alreadyComplete?: boolean }).alreadyComplete, true); assert.equal(calls, 1);
+});
+
+test("openai is an alias for the OpenAI Responses provider", async () => {
+  const path = journal();
+  const response = await execute(command(path, "alias-prompt", "Hello via alias", undefined, "openai"), {
+    environment: environment("sk-test-secret"),
+    openAiFetch: successFetch(),
+  });
+  assert.equal(response.exitCode, 0, JSON.stringify(response.body));
+  assert.match(JSON.stringify(response.body), /Hello from Responses/);
+  const events = new EventLog(path).read();
+  assert.equal(events.ok, true);
+  if (events.ok) assert.equal(events.value.some((event) => event.kind === "ProviderTurnStarted" && event.data.model === "gpt-5.6-luna"), true);
 });
 
 test("provider failures are secret-safe, durable, and exact retries do not fetch", async () => {
