@@ -24,6 +24,9 @@ export const parseCoreHandshake = (line: string): CoreEndpoint | undefined => {
   try { return validateEndpoint(JSON.parse(line)); } catch { return undefined; }
 };
 
+export const parseCoreEndpoint = (url: string | undefined, token: string | undefined): CoreEndpoint | undefined =>
+  validateEndpoint(url === undefined || token === undefined ? undefined : { url, token });
+
 const coreCliPath = (): string => fileURLToPath(new URL("./cli.js", import.meta.resolve("finleet-core")));
 const exited = (child: ChildProcess): boolean => child.exitCode !== null || child.signalCode !== null;
 const waitForExit = (child: ChildProcess): Promise<void> => new Promise((resolve) => exited(child) ? resolve() : child.once("exit", () => resolve()));

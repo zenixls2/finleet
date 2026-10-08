@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { parseCoreHandshake, startCoreProcess } from "./core-process.js";
+import { parseCoreEndpoint, parseCoreHandshake, startCoreProcess } from "./core-process.js";
 
 test("core handshake parser accepts only bounded loopback endpoint credentials", () => {
   const token = "a".repeat(32);
@@ -11,6 +11,9 @@ test("core handshake parser accepts only bounded loopback endpoint credentials",
   assert.equal(parseCoreHandshake("not json"), undefined);
   assert.equal(parseCoreHandshake(`{"url":"ws://localhost:4321","token":"${token}"}`), undefined);
   assert.equal(parseCoreHandshake("x".repeat(1025)), undefined);
+  assert.deepEqual(parseCoreEndpoint("ws://127.0.0.1:4321", token), { url: "ws://127.0.0.1:4321", token });
+  assert.equal(parseCoreEndpoint("ws://127.0.0.1:4321", undefined), undefined);
+  assert.equal(parseCoreEndpoint("ws://example.com:4321", token), undefined);
 });
 
 test("TUI-owned core child starts from its handshake and is reaped on close", async () => {

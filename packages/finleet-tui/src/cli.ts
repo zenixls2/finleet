@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { pathToFileURL } from "node:url";
-import { startCoreProcess } from "./core-process.js";
+import { parseCoreEndpoint, startCoreProcess } from "./core-process.js";
 import { WebSocketTuiClient } from "./tui-client.js";
 import { startTui } from "./tui.js";
 
@@ -46,8 +46,14 @@ const run = async (args: readonly string[]): Promise<{ exitCode: 0 | 2; body: un
   let core: Awaited<ReturnType<typeof startCoreProcess>> | undefined;
   const lifecycle = createTuiLifecycle(process, controller, async () => { await core?.close(); });
   try {
-    core = await startCoreProcess(args, { signal: controller.signal });
-    const client = await WebSocketTuiClient.connect(core.endpoint.url, core.endpoint.token);
+    const externalUrl = process.env.FINLEET_CORE_URL;
+    const externalToken = process.env.FINLEET_CORE_TOKEN;
+    const externalEndpoint = parseCoreEndpoint(externalUrl, externalToken);
+    if ((externalUrl !== undefined || externalToken !== undefined) && externalEndpoint === undefined) {
+      throw new Error("FINLEET_CORE_URL and FINLEET_CORE_TOKEN must specify a valid loopback core endpoint");
+    }
+    const endpoint = externalEndpoint ?? (core = await startCoreProcess(args, { signal: controller.signal })).endpoint;
+    const client = await WebSocketTuiClient.connect(endpoint.url, endpoint.token);
     try { return await startTui(args, client, { signal: controller.signal }); } finally { await client.close(); }
   } finally {
     lifecycle.dispose();
