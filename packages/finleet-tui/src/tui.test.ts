@@ -595,6 +595,24 @@ test("production TUI startup and /quit restore saved terminal modes", async () =
   assert.equal(output.writes.at(-1), shutdownTerminalFrame(false));
 });
 
+for (const [key, label] of [["\x03", "Ctrl+C"], ["\x04", "Ctrl+D"]] as const) {
+  test(`production TUI ${label} uses the same deterministic terminal cleanup`, async () => {
+    const input = new FakeTerminalInput();
+    const output = new FakeTerminalOutput();
+    const run = startTuiWithTerminal(["--session", `interrupt-${label.toLowerCase()}`], new FakeTuiClient(), input, output, { workingDirectory: "/tmp" });
+    await settleTui();
+    input.emitData(key);
+    const result = await run;
+
+    assert.deepEqual(result, { exitCode: 0, body: "" });
+    assert.deepEqual(input.rawModeCalls, [true, false]);
+    assert.equal(input.listenerCount("data"), 0);
+    assert.equal(output.listenerCount("resize"), 0);
+    assert.equal(input.pauseCalls, 1);
+    assert.equal(output.writes.at(-1), shutdownTerminalFrame(false));
+  });
+}
+
 test("production TUI abort signal uses the same deterministic terminal cleanup", async () => {
   const input = new FakeTerminalInput();
   const output = new FakeTerminalOutput();

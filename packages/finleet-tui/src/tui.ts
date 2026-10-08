@@ -2618,7 +2618,7 @@ export async function startTuiWithTerminal(
   if (!stdin.isTTY || !stdout.isTTY) return { exitCode: 2, body: "TUI requires an interactive terminal (stdin/stdout must be TTYs)" };
   if (!hasSupportedTerminalWidth(stdout.columns)) return { exitCode: 2, body: "TUI requires a terminal at least 20 columns wide" };
   const settings = parseSettings(args);
-  const mainSessionId = option(args, "--session") ?? `tui-${Date.now()}`;
+  const mainSessionId = option(args, "--session") ?? `tui-${randomUUID()}`;
   let sessionId = mainSessionId;
   const readlineInput = new PassThrough();
   const readlineOutput = new ReadlineOutputCapture(stdout);
@@ -3138,7 +3138,8 @@ export async function startTuiWithTerminal(
     const requestShutdown = (): void => {
       if (!tuiActive) return;
       tuiActive = false;
-      runShutdownRequestStep(() => { readline.write(null, { name: "return" }); });
+       // Ctrl+D is intercepted before reaching readline, so close its iterator directly.
+       runShutdownRequestStep(() => readline.close());
       const sessionsToCancel = new Set<string>(localSubmissionIds.keys());
      for (const [targetSessionId, events] of sessionEventCache) {
        runShutdownRequestStep(() => {
