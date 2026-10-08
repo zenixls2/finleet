@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#101312">
+    <title>Finleet Web</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/styles.css">
+    <script src="/config.js"></script>
+    <script src="/app.js" type="module"></script>
+  </head>
+  <body>
+    <div class="frame">
+      <header class="topbar">
+        <a class="wordmark" href="/">FINLEET / WEB</a>
+        <div class="connection"><span id="connection-dot" class="dot"></span><span id="connection-label">CONNECTING</span><span class="divider">/</span><span id="session-label" class="session-id"></span></div>
+      </header>
+      <main>
+        <section class="workspace" aria-label="Agent workspace">
+          <div class="stream-panel">
+            <div class="panel-heading"><h2>CONVERSATION</h2></div>
+            <div id="conversation" class="conversation" role="log" aria-live="polite" aria-relevant="additions">
+              <div id="empty-state" class="empty-state"><p>No messages yet.</p><small>Send a prompt to see the response here.</small></div>
+            </div>
+            <details class="activity-panel">
+              <summary><span>ACTIVITY</span><span id="event-count" class="count">0 EVENTS</span></summary>
+              <div id="stream" class="stream" role="log" aria-live="off"></div>
+            </details>
+            <div class="composer-wrap">
+              <form id="prompt-form" class="composer">
+                <label for="prompt" class="prompt-mark">YOU <span>›</span></label>
+                <textarea id="prompt" maxlength="512" rows="1" placeholder="What should the agent work on?" autocomplete="off" required></textarea>
+                <button id="send" type="submit" aria-label="Send prompt"><span>↗</span></button>
+              </form>
+              <div class="composer-foot"><span>ENTER TO SEND <i>·</i> SHIFT+ENTER FOR NEW LINE</span><button id="cancel" class="cancel" type="button" disabled>■ CANCEL RUN</button></div>
+            </div>
+          </div>
+          <aside class="rail">
+            <section class="rail-card">
+              <div class="rail-heading"><h2>SESSION</h2></div>
+              <div class="session-state"><span id="run-indicator" class="state-glyph">○</span><div><strong id="run-state">STANDBY</strong><small id="run-detail">No active turn</small></div></div>
+              <div class="rail-rule"></div>
+              <dl><div><dt>TRANSPORT</dt><dd>LOCAL / RPC</dd></div><div><dt>DELIVERY</dt><dd>ORDERED</dd></div><div><dt>RECORD</dt><dd>APPEND-ONLY</dd></div></dl>
+            </section>
+            <section class="rail-card permission-section">
+              <div class="rail-heading"><h2>APPROVALS</h2></div>
+              <div id="permissions" class="permissions"><p class="quiet">No action requires review.</p></div>
+            </section>
+            <div class="rail-note"><span>FINLEET CORE</span><p>Every action stays behind the same typed tools and explicit permission gates.</p><span class="note-rule"></span></div>
+          </aside>
+        </section>
+      </main>
+      <footer><span>FINLEET <b>●</b> LOCAL-FIRST AGENT INTERFACE</span><span>CORE OWNS THE DURABLE BOUNDARY</span></footer>
+    </div>
+  </body>
+</html>
