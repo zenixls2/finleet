@@ -1,0 +1,16 @@
+{
+  "name": "finleet-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": { "finleet-web": "dist/cli.js" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "npm run build --workspace=finleet-core && tsc -p tsconfig.json --noEmit",
+    "test": "node --test dist/*.test.js dist/**/*.test.js"
+  },
+  "dependencies": {
+    "finleet-core": "*",
+    "ws": "^8.21.3"
+  }
+}

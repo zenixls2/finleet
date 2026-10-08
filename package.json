@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "workspaces": ["packages/finleet-core", "packages/finleet-tui"],
+  "workspaces": ["packages/finleet-core", "packages/finleet-tui", "packages/finleet-web"],
   "scripts": {
     "build": "npm run build --workspaces",
     "typecheck": "npm run build --workspace=finleet-core && npm run typecheck --workspaces",
