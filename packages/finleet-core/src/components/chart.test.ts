@@ -92,7 +92,7 @@ test("new chart descriptors round trip strictly and reject additional fields", a
   assert.equal(tool.decode({ ...pie, extra: true }).ok, false);
 });
 
-test("K-line decoding has no count cap while durable output remains bounded", async () => {
+test("K-line decoding has no count cap while durable output stays within the expanded bound", async () => {
   const tool = chartTool();
   const candles = Array.from({ length: 65 }, (_unused, index) => ({ label: `p${index}`, open: index, high: index + 2, low: index - 1, close: index + 1, volume: 0 }));
   const decoded = tool.decode({ kind: "kline-chart", title: "DENSE", candles });
@@ -105,8 +105,8 @@ test("K-line decoding has no count cap while durable output remains bounded", as
   assert.equal(aggregate.ok, true);
   if (!aggregate.ok) return;
   const output = await tool.execute(aggregate.value, context);
-  assert.equal(output.ok, false);
-  if (!output.ok) assert.match(output.error.message, new RegExp(String(MAX_TOOL_RESULT)));
+  assert.equal(output.ok, true);
+  if (output.ok) assert.ok(JSON.stringify(tool.encode(output.value)).length <= MAX_TOOL_RESULT);
 });
 
 test("render_chart sizes the redacted durable representation", async () => {

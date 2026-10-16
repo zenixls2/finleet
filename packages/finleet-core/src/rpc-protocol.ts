@@ -1,6 +1,6 @@
 import type { DurableEvent, Json, Permission } from "./domain.js";
 
-export const RPC_MAX_BYTES = 64 * 1024;
+export const RPC_MAX_BYTES = 8 * 1024 * 1024;
 const RPC_MAX_JSON_DEPTH = 64;
 
 export type RpcId = string | number;

@@ -1,6 +1,6 @@
 import { closeSync, existsSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
-import { digest, EventLog, fail, FixturePaperExchange, MAX_EVENT_PREVIEW, MAX_EVENT_TEXT, MAX_TOOL_RESULT, nextInboxItem, projectHistory, redactJson, redactOutputText, sealBackgroundAgentBatches, type DurableEvent, type EventOfKind, type ExchangeAdapter, type FinleetError, type GraphPlan, type GraphPlanDraft, type HistoryMessage, type Json, type McpContract, type Permission, type PluginContract, type ProviderAdapter, type ProviderFinishReason, type Result } from "./domain.js";
+import { digest, EventLog, fail, FixturePaperExchange, MAX_EVENT_PREVIEW, MAX_EVENT_TEXT, MAX_TOOL_RESULT, nextInboxItem, projectHistory, redactJson, redactOutputText, redactToolResult, sealBackgroundAgentBatches, type DurableEvent, type EventOfKind, type ExchangeAdapter, type FinleetError, type GraphPlan, type GraphPlanDraft, type HistoryMessage, type Json, type McpContract, type Permission, type PluginContract, type ProviderAdapter, type ProviderFinishReason, type Result } from "./domain.js";
 
 export interface ProviderRequest { providerId: string; modelId: string; messages: readonly HistoryMessage[]; system: string; tools: readonly ToolAdvertisement[]; signal?: AbortSignal; }
 export type ProviderEvent = { type: "text"; text: string } | { type: "local_tool_call"; callId: string; name: string; arguments: unknown } | { type: "provider_tool_call"; callId: string; name: string; arguments: unknown; execution: "local" | "provider" } | { type: "finished"; finishReason: ProviderFinishReason; usage: { inputTokens: number; outputTokens: number } };
@@ -459,7 +459,7 @@ async run(sessionId: string): Promise<Result<RunResult>> {
      recordEffect(this.log, sessionId, effectId, "failed", { code: result.error.code });
       return { ok: true, value: { status: "failed", error: result.error } };
    }
-   const redacted = stableJson(redactJson(result.value));
+      const redacted = stableJson(redactToolResult(sanitizeValue(result.value)));
    const preview = bounded(redacted, MAX_EVENT_PREVIEW);
     const durableResult = bounded(redacted, effectiveDurableResultLimit(preparedTool?.definition.durableResultLimit));
    this.log.append(sessionId, { kind: "ToolSucceeded", data: { callId: event.callId, preview: preview.value, truncated: preview.truncated, result: durableResult.value, resultTruncated: durableResult.truncated } });

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { applyConversationEvent, createConversationProjection } from "./conversation.js";
+import { applyConversationEvent, createConversationProjection, formatFeedTime, validFeedMode } from "./conversation.js";
 import type { DurableEvent } from "finleet-core";
 
 const event = (id: string, kind: DurableEvent["kind"], data: DurableEvent["data"]): DurableEvent => ({
@@ -66,4 +66,29 @@ test("provider failures are surfaced on the associated turn", () => {
   const result = applyConversationEvent(projection, event("failed", "ProviderTurnFailed", { providerCallId: "r:turn-1", code: "PROVIDER_FAILED", message: "Provider unavailable" }));
   assert.equal(result?.status, "failed");
   assert.equal(result?.error, "Provider unavailable");
+});
+
+test("chat-clean keeps timestamps and folds tool events into safe activity labels", () => {
+  const projection = createConversationProjection();
+  const turn = applyConversationEvent(projection, event("admit", "PromptAdmitted", { promptId: "p", prompt: "inspect", delivery: "queue" }))!;
+  applyConversationEvent(projection, event("call", "ToolCalled", { callId: "private-id", name: "bash", argumentsDigest: "digest", arguments: "secret command" }));
+  applyConversationEvent(projection, event("done", "ToolSucceeded", { callId: "private-id", preview: "private path", truncated: false }));
+  assert.equal(turn.promptAt, "2026-01-01T00:00:00.000Z");
+  assert.equal(turn.activity.length, 1);
+  assert.equal(turn.activity[0]?.state, "done");
+  assert.equal(turn.activity[0]?.label, "Working");
+  assert.doesNotMatch(JSON.stringify(turn.activity), /private-id|secret command|private path|bash/);
+  assert.equal(formatFeedTime("invalid"), "--:--:--");
+  assert.equal(validFeedMode("clean"), true);
+  assert.equal(validFeedMode("other"), false);
+});
+
+test("chat-clean turns failures into timestamped recovery guidance", () => {
+  const projection = createConversationProjection();
+  applyConversationEvent(projection, event("admit", "PromptAdmitted", { promptId: "p", prompt: "fail", delivery: "queue" }));
+  applyConversationEvent(projection, event("call", "ToolCalled", { callId: "c", name: "tool", argumentsDigest: "digest" }));
+  const turn = applyConversationEvent(projection, event("failed", "ToolFailed", { callId: "c", code: "INTERNAL_CODE", message: "raw stack" }));
+  assert.equal(turn?.activity[0]?.state, "error");
+  assert.match(turn?.activity[0]?.detail ?? "", /permissions|retry/i);
+  assert.doesNotMatch(JSON.stringify(turn?.activity), /INTERNAL_CODE|raw stack/);
 });

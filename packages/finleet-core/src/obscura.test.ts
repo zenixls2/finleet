@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { obscuraFetchTool } from "./obscura.js";
-import type { Permission } from "./domain.js";
+import { MAX_TOOL_RESULT, type Permission } from "./domain.js";
 import type { ToolContext } from "./runtime.js";
 
 const context: ToolContext = { sessionId: "s", agentId: "a", assistantMessageId: "m", providerCallId: "p", permissions: new Set<Permission>(["web:read"]) };
@@ -95,15 +95,36 @@ test("Obscura fetch can return bounded rendered HTML after a page-load wait", as
    if (decoded.ok) assert.deepEqual(await tool.execute(decoded.value, context), { ok: true, value: { url: "https://www.google.com/finance/quote/UUUU:NYSEAMERICAN?hl=en", content: "fetch https://www.google.com/finance/quote/UUUU:NYSEAMERICAN?hl=en --dump html --wait-until load --wait 5 --timeout 30 --allow-private-network", truncated: false } });
 });
 
-test("Obscura fetch tolerates noisy browser output while bounding returned content", async () => {
+test("Obscura fetch returns complete chart JSON above previous result limits", async () => {
   const directory = mkdtempSync(join(tmpdir(), "finleet-obscura-noisy-"));
   const binary = join(directory, "obscura");
-  writeFileSync(binary, "#!/bin/sh\nprintf '%020000s' ''\nprintf '%s' '# usable page'\n");
+  const chartJson = JSON.stringify({ chart: { result: [{ timestamp: Array.from({ length: 5_000 }, (_, index) => index), indicators: { quote: [{ close: Array.from({ length: 5_000 }, (_, index) => index + 0.25) }] } }] } });
+  writeFileSync(binary, `#!/bin/sh\nprintf '%s' '${chartJson}'\n`);
+  chmodSync(binary, 0o755);
+  const tool = obscuraFetchTool(binary, { stealth: false });
+  assert.equal(tool.durableResultLimit, MAX_TOOL_RESULT);
+  assert.ok(chartJson.length > 16_384);
+  const decoded = tool.decode({ url: "https://example.com" });
+  assert.equal(decoded.ok, true);
+  if (decoded.ok) assert.deepEqual(await tool.execute(decoded.value, context), { ok: true, value: { url: "https://example.com/", content: chartJson, truncated: false } });
+});
+
+test("Obscura fetch marks output truncated only when the process capture ceiling is exceeded", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "finleet-obscura-capture-limit-"));
+  const binary = join(directory, "obscura");
+  writeFileSync(binary, "#!/bin/sh\nprintf '%1100000s' ''\n");
   chmodSync(binary, 0o755);
   const tool = obscuraFetchTool(binary, { stealth: false });
   const decoded = tool.decode({ url: "https://example.com" });
   assert.equal(decoded.ok, true);
-  if (decoded.ok) assert.deepEqual(await tool.execute(decoded.value, context), { ok: true, value: { url: "https://example.com/", content: "0".repeat(8192), truncated: true } });
+  if (decoded.ok) {
+    const result = await tool.execute(decoded.value, context);
+    assert.equal(result.ok, true);
+    if (result.ok) {
+      assert.equal(result.value.content.length, 1024 * 1024);
+      assert.equal(result.value.truncated, true);
+    }
+  }
 });
 
 test("Obscura fetch options enable stealth and explicitly allow private HTTPS hosts", async () => {

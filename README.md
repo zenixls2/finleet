@@ -5,6 +5,8 @@
 
 **CURRENT:** Finleet is an npm workspace with three packages. `packages/finleet-core` owns the durable domain/runtime, providers, tools, `CoreService`, authenticated loopback JSON-RPC/WebSocket server, protocol, and headless CLI. `packages/finleet-tui` owns terminal presentation, image/LaTeX/chart rendering, browser helpers, and the native safe-mutate helper. `packages/finleet-web` owns a local browser presentation and a loopback HTTP/WebSocket proxy; both UIs communicate with core through the authenticated no-compression loopback WebSocket boundary.
 
+**CURRENT:** `git-guide/` is a standalone Rust CLI for repository documentation discovery. It scans Git-ignored-aware Markdown, extracts headings and local links, stores a useful-document map plus SQLite full-text index, and emits compact agent guidebooks. It is deliberately separate from the Finleet runtime and never modifies project source files.
+
 **NORMATIVE:** `docs/implementation-guild.md` governs `INV-ADMISSION-DURABLE`, `INV-EXECUTION-SERIAL`, `INV-TURN-ONE-STREAM`, `INV-HISTORY-PROJECTED`, typed/authorized tools, recorded-outcome replay, and immutable plans.
 
 **PROPOSED:** The local graph snapshot is a full append-only plan record with a digest calculated internally. Improvement proposals are immutable non-active data records only; no proposal can activate a plan.
@@ -25,6 +27,13 @@ npm test
 npm run typecheck
 npm run build
 npm run obscura:install
+
+# Build and use the standalone Rust repository guide tool.
+cargo build --release --manifest-path git-guide/Cargo.toml
+./git-guide/target/release/git-guide index .
+./git-guide/target/release/git-guide guide .
+./git-guide/target/release/git-guide query "session invariants" --repo .
+./git-guide/target/release/git-guide show docs/implementation-guild.md --repo .
 
 node packages/finleet-core/dist/cli.js models list --offline --cache ./fixtures/models-cache.json --format json
 node packages/finleet-core/dist/cli.js providers list --format json
@@ -57,6 +66,8 @@ node packages/finleet-core/dist/cli.js resume --last "Continue again" --provider
 node packages/finleet-core/dist/cli.js agent run --provider fake --exchange paper --prompt "Summarize FIN" --delivery queue --session paper-1 --prompt-id prompt-1 --format json --journal ./tmp/finleet.jsonl
 node packages/finleet-core/dist/cli.js replay --journal ./tmp/finleet.jsonl --session paper-1 --format json
 ```
+
+The guide database defaults to `.finleet/knowledge.sqlite3` in the scanned repository. Use `--db PATH` to place it elsewhere. The first `index` builds a complete map; when Git reports a dirty worktree, subsequent indexing atomically updates only dirty paths (including removals), preserving unaffected documents and repairing Markdown-link mappings. A clean-worktree index performs a full refresh. `guide` summarizes the most useful documents; `query` ranks relevant documents through SQLite FTS5; and `show` prints indexed headings and local Markdown references. Results are navigation hints, not source evidence: agents should open the cited files for full context.
 
 **CURRENT:** Finleet implements Codex-inspired durable session semantics, not full Codex parity. A session is created by its first durable prompt admission; `sessions list` returns bounded metadata sorted by newest durable activity, while `session show` loads the projected transcript on demand without invoking a provider or tool. `exec` admits then executes through the canonical EventLog and Runner. `exec resume <id>` / `resume <id>` and `--last` append a newly admitted prompt to an existing durable session; `--last` resolves deterministically by newest activity. Scripted `exec -` accepts bounded non-empty stdin (512 bytes maximum). `agent run` remains the explicit compatibility alias.
 

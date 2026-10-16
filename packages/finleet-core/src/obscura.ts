@@ -1,12 +1,12 @@
 import { spawn } from "node:child_process";
 import { isIP } from "node:net";
 import { join } from "node:path";
-import { redactJson, type Json } from "./domain.js";
+import { MAX_TOOL_RESULT, redactJson, type Json } from "./domain.js";
 import type { ToolDefinition } from "./runtime.js";
 
 const MAX_URL_LENGTH = 2048;
-const MAX_FETCH_OUTPUT = 8192;
 const MAX_PROCESS_OUTPUT = 1024 * 1024;
+const MAX_FETCH_OUTPUT = MAX_PROCESS_OUTPUT;
 const FETCH_TIMEOUT_MS = 45_000;
 const PROJECT_OBSCURA_VERSION = "v0.2.1";
 const record = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
@@ -68,7 +68,7 @@ interface FetchInput { url: string; format: FetchFormat; }
 interface FetchOutput { url: string; content: string; truncated: boolean; }
 export interface ObscuraFetchOptions { stealth?: boolean; allowPrivateNetwork?: boolean; }
 
-interface ObscuraProcessResult { error?: Error; status: number | null; signal: NodeJS.Signals | null; stdout: string; stderr: string; }
+interface ObscuraProcessResult { error?: Error; status: number | null; signal: NodeJS.Signals | null; stdout: string; stderr: string; stdoutTruncated: boolean; }
 const failureDiagnostic = (result: ObscuraProcessResult): string => {
   const parts: string[] = [];
   if (result.error !== undefined) {
@@ -94,6 +94,7 @@ export function obscuraFetchTool(binary = process.env.FINLEET_OBSCURA_BIN ?? pro
        requiredPermission: "web:read",
        inputSchema: { type: "object", required: ["url"], properties: { url: { type: "string", format: "uri", pattern: "^https://" }, format: { type: "string", enum: ["markdown", "html", "original"], description: "Rendered output format; html returns the post-JavaScript DOM" } } },
     },
+    durableResultLimit: MAX_TOOL_RESULT,
     decode(input: unknown) {
        if (!record(input) || typeof input.url !== "string") return { ok: false, error: { code: "TOOL_ARGUMENT_INVALID", message: "Expected an object containing { url: string, format?: markdown|html|original }" } };
        const format = input.format === undefined ? "markdown" : input.format;
@@ -124,11 +125,12 @@ export function obscuraFetchTool(binary = process.env.FINLEET_OBSCURA_BIN ?? pro
         const result = await new Promise<ObscuraProcessResult>((resolve) => {
           let stdout = "";
           let stderr = "";
+          let stdoutTruncated = false;
          let settled = false;
          let timer: ReturnType<typeof setTimeout> | undefined;
           let forceTimer: ReturnType<typeof setTimeout> | undefined;
           const child = spawn(binary, argumentsList, { env: childEnvironment(), detached: process.platform !== "win32" });
-          const finish = (value: ObscuraProcessResult): void => { if (settled) return; settled = true; if (timer !== undefined) clearTimeout(timer); if (forceTimer !== undefined) clearTimeout(forceTimer); context.signal?.removeEventListener("abort", abort); resolve(value); };
+          const finish = (value: Omit<ObscuraProcessResult, "stdoutTruncated">): void => { if (settled) return; settled = true; if (timer !== undefined) clearTimeout(timer); if (forceTimer !== undefined) clearTimeout(forceTimer); context.signal?.removeEventListener("abort", abort); resolve({ ...value, stdoutTruncated }); };
           const kill = (signal: NodeJS.Signals): void => {
             if (process.platform !== "win32" && child.pid !== undefined) {
               try { process.kill(-child.pid, signal); return; } catch { /* fall through */ }
@@ -141,7 +143,11 @@ export function obscuraFetchTool(binary = process.env.FINLEET_OBSCURA_BIN ?? pro
           };
           child.stdout.setEncoding("utf8");
           child.stderr.setEncoding("utf8");
-          child.stdout.on("data", (chunk: string) => { stdout = (stdout + chunk).slice(0, MAX_PROCESS_OUTPUT); });
+          child.stdout.on("data", (chunk: string) => {
+            const remaining = MAX_PROCESS_OUTPUT - stdout.length;
+            stdout += chunk.slice(0, remaining);
+            if (chunk.length > remaining) stdoutTruncated = true;
+          });
           child.stderr.on("data", (chunk: string) => { stderr = (stderr + chunk).slice(0, MAX_PROCESS_OUTPUT); });
           child.once("error", (error) => finish({ error, status: null, signal: null, stdout, stderr }));
           child.once("close", (status, signal) => finish({ status, signal, stdout, stderr }));
@@ -150,7 +156,7 @@ export function obscuraFetchTool(binary = process.env.FINLEET_OBSCURA_BIN ?? pro
           else context.signal?.addEventListener("abort", abort, { once: true });
         });
       if (result.error !== undefined || result.status !== 0 || typeof result.stdout !== "string") return { ok: false, error: { code: "TOOL_FETCH_FAILED", message: `Obscura could not fetch the requested page (${failureDiagnostic(result)})` } };
-      return { ok: true, value: { url: input.url, content: result.stdout.slice(0, MAX_FETCH_OUTPUT), truncated: result.stdout.length > MAX_FETCH_OUTPUT } };
+       return { ok: true, value: { url: input.url, content: result.stdout.slice(0, MAX_FETCH_OUTPUT), truncated: result.stdoutTruncated || result.stdout.length > MAX_FETCH_OUTPUT } };
     },
     encode(output): Json { return { url: output.url, content: output.content, truncated: output.truncated }; },
   };
