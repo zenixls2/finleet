@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { basename, resolve } from "node:path";
 import { readFile, stat } from "node:fs/promises";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { stdin as processStdin, stdout as processStdout } from "node:process";
 import { PassThrough, Writable } from "node:stream";
 import { StringDecoder } from "node:string_decoder";
@@ -1192,6 +1193,23 @@ export interface TuiInteractionState {
   selection?: TextSelection;
 }
 
+export type TuiFeedMode = "clean" | "normal" | "raw";
+const validFeedMode = (value: unknown): value is TuiFeedMode => value === "clean" || value === "normal" || value === "raw";
+const feedPreferencePath = (): string => resolve(homedir(), ".config", "finleet", "chat-clean.json");
+export const readFeedPreference = (path = feedPreferencePath()): TuiFeedMode => {
+  try {
+    const value: unknown = JSON.parse(readFileSync(path, "utf8"));
+    return typeof value === "object" && value !== null && "mode" in value && validFeedMode(value.mode) ? value.mode : "clean";
+  } catch { return "clean"; }
+};
+export const writeFeedPreference = (mode: TuiFeedMode, path = feedPreferencePath()): void => {
+  const directory = resolve(path, "..");
+  mkdirSync(directory, { recursive: true });
+  const temporary = `${path}.${process.pid}.tmp`;
+  writeFileSync(temporary, JSON.stringify({ mod: "chat-clean", mode }), { mode: 0o600 });
+  renameSync(temporary, path);
+};
+
 export interface SelectionPoint {
   column: number;
   row: number;
@@ -1636,11 +1654,10 @@ export const scrollHarness = (state: TuiInteractionState, direction: MouseWheelD
   return { ...state, scrollOffset: offset };
 };
 
-export const toggleHarnessFlow = (state: TuiInteractionState, flowId: string, flows: readonly Pick<HarnessFlow, "id">[]): TuiInteractionState => {
+export const toggleHarnessFlow = (state: TuiInteractionState, flowId: string, _flows: readonly Pick<HarnessFlow, "id">[]): TuiInteractionState => {
   const expanded = new Set(state.expanded);
   if (expanded.has(flowId)) expanded.delete(flowId); else expanded.add(flowId);
-  const selected = flows.findIndex((flow) => flow.id === flowId);
-  return selected < 0 ? state : { expanded, scrollOffset: state.scrollOffset };
+  return { ...state, expanded };
 };
 
 const safeEventData = (event: DurableEvent): string => {
@@ -1825,19 +1842,38 @@ const renderAssistantParts = (body: string, events: readonly DurableEvent[], wid
   };
 };
 
-export const renderPromptBoard = (board: PromptBoard, state: TuiInteractionState, width = terminalWidth(), index = 0): { text: string; hitBoxes: readonly HarnessHitBox[]; linkBoxes: readonly TerminalLinkHitBox[]; selectableRows: readonly SelectableRow[]; lineOwners: readonly (string | undefined)[] } => {
+export const renderPromptBoard = (board: PromptBoard, state: TuiInteractionState, width = terminalWidth(), index = 0, feedMode: TuiFeedMode = "raw"): { text: string; hitBoxes: readonly HarnessHitBox[]; linkBoxes: readonly TerminalLinkHitBox[]; selectableRows: readonly SelectableRow[]; lineOwners: readonly (string | undefined)[] } => {
   width = terminalWidth(width);
-  const flows = visibleHarnessItems(board.events, state.expanded);
-  const promptLines = renderConsolePrompt(board.prompt, width);
+  const fullFlows = visibleHarnessItems(board.events, state.expanded);
+  const runTools = board.events.filter((event) => event.kind === "ToolCalled").length;
+  const failedTools = board.events.filter((event) => event.kind === "ToolFailed").length;
+  const failedEvents = board.events.filter((event) => event.kind === "ToolFailed" || event.kind === "ProviderTurnFailed" || (event.kind === "TaskConclusion" && event.data.outcome !== "finished"));
+  const firstTime = board.events.find((event) => event.kind === "PromptAdmitted")?.at;
+  const lastTime = board.events.at(-1)?.at ?? firstTime;
+  const formatTime = (at: string | undefined): string => {
+    if (at === undefined) return "--:--:--";
+    const date = new Date(at);
+    return Number.isNaN(date.valueOf()) ? "--:--:--" : date.toLocaleTimeString([], { hour12: false });
+  };
+  const cleanActivity = board.events.filter((event) => event.kind === "HarnessThinking" || event.kind === "ToolCalled" || event.kind === "ToolSucceeded" || event.kind === "ToolFailed");
+  const summaryId = `chat-clean:${board.promptId}`;
+  const summaryEvent = cleanActivity[0];
+  const cleanFlows: HarnessDisplayItem[] = [
+    ...(summaryEvent === undefined ? [] : [{ id: summaryId, event: summaryEvent, label: `${promptBoardStatus(board) === "running" ? "◌ Working · " : ""}${cleanActivity.filter((event) => event.kind === "ToolCalled").length} steps · ${failedEvents.length} errors` }]),
+    ...(feedMode === "normal" ? [] : failedEvents.map((event) => ({ id: event.id, event, label: `${formatTime(event.at)} · Something went wrong. Review permissions or connection, then retry.` }))),
+  ];
+  const flows: readonly HarnessDisplayItem[] = feedMode === "raw" ? fullFlows : cleanFlows;
+  const promptLines = renderConsolePrompt(feedMode === "raw" ? board.prompt : `YOU · ${formatTime(firstTime)}\n${board.prompt}`, width);
+  const showActivityPanel = feedMode === "raw" || flows.length > 0;
   const lines: RenderedLine[] = [
     ...promptLines.map((line) => ({ text: line, links: [] })),
-    ...(promptLines.length === 0 ? [] : [{ text: "", links: [] }]),
-    { text: panelTop(`HARNESS // TURN ${index + 1}`, width, ansi.cyan), links: [] },
+    ...(feedMode === "raw" && promptLines.length > 0 ? [{ text: "", links: [] }] : []),
+    ...(showActivityPanel ? [{ text: panelTop(feedMode === "normal" ? `RUN · ${runTools} actions · ${failedTools} errors` : "ACTIVITY", width, ansi.cyan), links: [] }] : []),
   ];
   const selectableRows: SelectableRow[] = [
     ...promptLines.map(() => true),
-    ...(promptLines.length === 0 ? [] : [false]),
-    false,
+    ...(feedMode === "raw" && promptLines.length > 0 ? [false] : []),
+    ...(showActivityPanel ? [false] : []),
   ];
   const hitBoxes: HarnessHitBox[] = [];
   const linkBoxes: TerminalLinkHitBox[] = [];
@@ -1856,7 +1892,17 @@ export const renderPromptBoard = (board: PromptBoard, state: TuiInteractionState
       selectableRows.push(...chartLines.map(() => false));
       row += chartLines.length;
     }
-    const detailEvent = detailsEvent(flow);
+    if (feedMode !== "raw" && flow.id === summaryId && state.expanded.has(flow.id)) {
+      const safeDetails = cleanActivity.map((event) => event.kind === "ToolFailed"
+        ? `${formatTime(event.at)} · Something went wrong. Review permissions or connection, then retry.`
+        : event.kind === "ToolCalled" ? `${formatTime(event.at)} · Working` : event.kind === "ToolSucceeded" ? `${formatTime(event.at)} · Step complete` : `${formatTime(event.at)} · Working`);
+      const details = renderPanelLines(safeDetails, width, ansi.cyan, row, ansi.detailsBackground);
+      lines.push(...details.lines);
+      selectableRows.push(...details.lines.map(() => false));
+      linkBoxes.push(...details.linkBoxes);
+      row += details.lines.length;
+    }
+    const detailEvent = feedMode === "raw" ? detailsEvent(flow) : undefined;
     if (detailEvent !== undefined && state.expanded.has(flow.id)) {
       const details = renderPanelLines(wrapText(eventDetails(detailEvent, detailsEvents(flow, board.events)), Math.max(1, width - 6)), width, ansi.cyan, row, ansi.detailsBackground);
       lines.push(...details.lines);
@@ -1865,20 +1911,25 @@ export const renderPromptBoard = (board: PromptBoard, state: TuiInteractionState
       row += details.lines.length;
     }
   }
-  if (flows.length === 0) {
+  if (flows.length === 0 && feedMode === "raw") {
     const empty = renderPanelLines(["No harness events recorded yet"], width, ansi.cyan, row);
     lines.push(...empty.lines);
     selectableRows.push(...empty.lines.map(() => false));
     linkBoxes.push(...empty.linkBoxes);
     row += empty.lines.length;
   }
-  lines.push({ text: panelBottom(width, ansi.cyan), links: [] });
-  selectableRows.push(false);
-  lines.push({ text: "", links: [] });
-  selectableRows.push(false);
+  if (showActivityPanel) {
+    lines.push({ text: panelBottom(width, ansi.cyan), links: [] });
+    selectableRows.push(false);
+  }
+  if (feedMode === "raw") {
+    lines.push({ text: "", links: [] });
+    selectableRows.push(false);
+  }
   const status = promptBoardStatus(board);
   const continuing = status === "running" && board.events.some((event) => event.kind === "ProviderTurnFinished" && event.data.finishReason === "tool-calls");
   const assistant = renderAssistantParts(board.assistant, board.events, width, status, continuing);
+  assistant.lines[0] = { text: panelTop(`AGENT · ${formatTime(lastTime)}`, width, ansi.cyan), links: [] };
   const lineOwners: Array<string | undefined> = lines.map(() => undefined);
   lines.push(...assistant.lines);
   selectableRows.push(...assistant.lines.map((_, assistantIndex) => assistantIndex > 0 && assistantIndex < assistant.lines.length - 1
@@ -1900,7 +1951,7 @@ export interface RenderedPromptHistory {
   maxScrollOffset: number;
 }
 
-export const renderPromptHistory = (boards: readonly PromptBoard[], state: TuiInteractionState, width = terminalWidth(), viewportRows = 24, headerRows = 0): RenderedPromptHistory => {
+export const renderPromptHistory = (boards: readonly PromptBoard[], state: TuiInteractionState, width = terminalWidth(), viewportRows = 24, headerRows = 0, feedMode: TuiFeedMode = "raw"): RenderedPromptHistory => {
   width = terminalWidth(width);
   const bodyLines: string[] = [];
   const bodySelectableRows: SelectableRow[] = [];
@@ -1908,7 +1959,7 @@ export const renderPromptHistory = (boards: readonly PromptBoard[], state: TuiIn
   const bodyHits: HarnessHitBox[] = [];
   const bodyLinks: TerminalLinkHitBox[] = [];
   for (const [index, board] of boards.entries()) {
-    const rendered = renderPromptBoard(board, state, width, index);
+    const rendered = renderPromptBoard(board, state, width, index, feedMode);
     const startRow = bodyLines.length + 1;
     bodyLines.push(...rendered.text.split("\n"));
     bodySelectableRows.push(...rendered.selectableRows);
@@ -2053,7 +2104,7 @@ const layoutRows = (screenRows: number, headerRows: number, promptRows: number, 
   return { inputRows, viewportRows: Math.max(1, available - inputRows) };
 };
 const TUI_FOOTER_ROWS = 2;
-const readlineControlBytes = new Set(["\x01", "\x02", "\x05", "\x06", "\x08", "\x09", "\x0a", "\x0b", "\x0d", "\x0e", "\x10", "\x15", "\x17", "\x19", "\x1a", "\x7f"]);
+const readlineControlBytes = new Set(["\x01", "\x02", "\x05", "\x06", "\x08", "\x09", "\x0a", "\x0b", "\x0d", "\x0e", "\x0f", "\x10", "\x15", "\x17", "\x19", "\x1a", "\x7f"]);
 const readlineEscapeSequences = new Set(["\x1b[A", "\x1b[B", "\x1b[C", "\x1b[D", "\x1bOA", "\x1bOB", "\x1bOC", "\x1bOD", "\x1b[H", "\x1b[F", "\x1bOH", "\x1bOF", "\x1b[1~", "\x1b[3~", "\x1b[4~", "\x1b[5~", "\x1b[6~"]);
 const sanitizeReadlineInput = (input: string): string => input
   .replace(/(?:\x1b(?:\][\s\S]*?(?:\x07|\x1b\\|\x9c|$)|P[\s\S]*?(?:\x1b\\|\x9c|$)|X[\s\S]*?(?:\x1b\\|\x9c|$)|\^[\s\S]*?(?:\x1b\\|\x9c|$)|_[\s\S]*?(?:\x07|\x1b\\|\x9c|$))|[\x90\x98\x9d\x9e\x9f][\s\S]*?(?:\x07|\x1b\\|\x9c|$))/g, "")
@@ -2286,7 +2337,7 @@ const appendOverlayBackButton = (lines: string[], buttons: OverlayButton[], widt
 
 export const renderHelp = (width = terminalWidth()): OverlayRender => {
   const safeWidth = terminalWidth(width);
-  const commands = ["  /model <provider/model>  select a model", "  /agent  toggle primary/build view", "  /thinking  toggle thinking visibility", "  /details  toggle harness details", "  /harness <n>  toggle harness row and show detail", "  /scroll up|down|top|bottom  scroll prompt history", "  /open <https-url>  open a safe link", "  /image <path>  render an image in the terminal", "  /settings  show current settings", "  /list_agents  show active main and background agents", "  --context-window <N>  set the context window in tokens", "  /help  show this help", "  /quit  exit"];
+  const commands = ["  /model <provider/model>  select a model", "  /agent  toggle primary/build view", "  /thinking  toggle thinking visibility", "  /details  toggle harness details", "  /feed clean|normal|raw  change the persistent activity feed", "  Ctrl+O  toggle the full raw transcript", "  /harness <n>  toggle harness row and show detail", "  /scroll up|down|top|bottom  scroll prompt history", "  /open <https-url>  open a safe link", "  /image <path>  render an image in the terminal", "  /settings  show current settings", "  /list_agents  show active main and background agents", "  --context-window <N>  set the context window in tokens", "  /help  show this help", "  /quit  exit"];
   const contents = commands.flatMap((command) => wrapText(command, Math.max(1, safeWidth - 4)));
   const lines = [panelTop("COMMANDS // HELP", safeWidth), ...contents.map((line) => panelLine(line, safeWidth))];
   const buttons: OverlayButton[] = [];
@@ -2578,7 +2629,7 @@ export const openTerminalLink = async (value: string, openBrowser: (url: string)
   return true;
 };
 
-export type TuiDependencies = { clipboard?: ClipboardWriter; workingDirectory?: string; openBrowser?: (url: string) => Promise<void>; signal?: AbortSignal; };
+export type TuiDependencies = { clipboard?: ClipboardWriter; workingDirectory?: string; openBrowser?: (url: string) => Promise<void>; signal?: AbortSignal; readFeedMode?: () => TuiFeedMode; writeFeedMode?: (mode: TuiFeedMode) => void; };
 
 export type ClipboardWriter = (text: string) => Promise<boolean>;
 
@@ -2618,6 +2669,8 @@ export async function startTuiWithTerminal(
   if (!stdin.isTTY || !stdout.isTTY) return { exitCode: 2, body: "TUI requires an interactive terminal (stdin/stdout must be TTYs)" };
   if (!hasSupportedTerminalWidth(stdout.columns)) return { exitCode: 2, body: "TUI requires a terminal at least 20 columns wide" };
   const settings = parseSettings(args);
+  let feedMode = dependencies.readFeedMode?.() ?? readFeedPreference();
+  let previousFeedMode: TuiFeedMode = feedMode === "raw" ? "clean" : feedMode;
   const mainSessionId = option(args, "--session") ?? `tui-${randomUUID()}`;
   let sessionId = mainSessionId;
   const readlineInput = new PassThrough();
@@ -2743,11 +2796,11 @@ export async function startTuiWithTerminal(
        const footer = [panelLine(singleLineText(activity), width, ansi.amber, ansi.detailsBackground), statusBar];
       const { inputRows, viewportRows } = layoutRows(screenRows, header.length, promptLines.length, requestedInputRows, imageRows, footer.length);
     const historyHeaderRows = header.length + promptLines.length;
-      lastHistory = renderPromptHistory(boards, interaction, width, viewportRows, historyHeaderRows);
+  lastHistory = renderPromptHistory(boards, interaction, width, viewportRows, historyHeaderRows, feedMode);
       const navigation = reconcileHistoryNavigation(interaction, historyMode, lastHistory.totalRows, viewportRows);
       if (navigation.state.scrollOffset !== interaction.scrollOffset) {
         interaction = navigation.state;
-        lastHistory = renderPromptHistory(boards, interaction, width, viewportRows, historyHeaderRows);
+  lastHistory = renderPromptHistory(boards, interaction, width, viewportRows, historyHeaderRows, feedMode);
       } else interaction = navigation.state;
     lastHitBoxes = lastHistory.hitBoxes;
     lastLinkBoxes = lastHistory.linkBoxes;
@@ -3257,7 +3310,13 @@ export async function startTuiWithTerminal(
     pendingTerminalCellPixels = cellPixels.pending;
      const shiftedInput = prepareShiftEnterInput(pendingShiftEnterInput, cellPixels.input);
      pendingShiftEnterInput = shiftedInput.pending;
-     let decodedChunk = shiftedInput.input;
+      let decodedChunk = shiftedInput.input;
+      if (decodedChunk.includes("\x0f")) {
+        decodedChunk = decodedChunk.replaceAll("\x0f", "");
+        if (feedMode === "raw") feedMode = previousFeedMode;
+        else { previousFeedMode = feedMode; feedMode = "raw"; }
+        renderScreen();
+      }
     const reportedCellPixels = cellPixels.cellPixels;
     if (reportedCellPixels !== undefined && (reportedCellPixels.width !== terminalCellPixels.width || reportedCellPixels.height !== terminalCellPixels.height)) {
       terminalCellPixels = reportedCellPixels;
@@ -3517,12 +3576,24 @@ export async function startTuiWithTerminal(
          if (!tuiActive) break;
          const prompt = line;
          const input = line.trim();
-         if (input !== "/help" && input !== "/settings" && input !== "/list_agents") overlay = undefined;
+        if (input !== "/help" && input !== "/settings" && input !== "/list_agents") overlay = undefined;
         inputHistoryIndex = -1;
         if (input.length === 0) { flushQueuedInput(); continue; }
         if (input === "/quit" || input === "/exit") { tuiActive = false; break; }
          if (input === "/help") { overlay = "help"; renderScreen(); flushQueuedInput(); continue; }
-         if (input === "/settings") { overlay = "settings"; renderScreen(); flushQueuedInput(); continue; }
+        if (input === "/settings") { overlay = "settings"; renderScreen(); flushQueuedInput(); continue; }
+        if (input === "/feed" || /^\/feed\s+(clean|normal|raw)$/i.test(input)) {
+          const requested = input === "/feed" ? "clean" : input.split(/\s+/)[1]?.toLowerCase();
+          if (requested !== "clean" && requested !== "normal" && requested !== "raw") showTransientNotice("Usage: /feed clean|normal|raw");
+          else {
+            if (requested !== "raw") previousFeedMode = requested;
+            feedMode = requested;
+            try { (dependencies.writeFeedMode ?? writeFeedPreference)(feedMode); showTransientNotice(`Chat Clean: ${feedMode} feed saved.`); }
+            catch { showTransientNotice("Feed changed for this session; unable to save preference."); }
+            renderScreen();
+          }
+          flushQueuedInput(); continue;
+        }
          if (input === "/list_agents") { try { liveAgents = await client.listAgents(mainSessionId); } catch { liveAgents = []; showTransientNotice("Unable to list background agents."); } overlay = "agents"; renderScreen(); flushQueuedInput(); continue; }
        if (input === "/agent") { settings.agent = settings.agent === "primary" ? "build" : "primary"; renderScreen(); flushQueuedInput(); continue; }
         if (input === "/thinking") { settings.thinking = !settings.thinking; syncThinking(sessionId); renderScreen(); flushQueuedInput(); continue; }

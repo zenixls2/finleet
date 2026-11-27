@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -13,7 +13,7 @@ import { activateAgentPanelButton, cacheSessionEvent, dispatchHistoryWheel, hitT
 import { activateOverlayButton, clipOverlayRender, hitTestOverlayButton, offsetOverlayButtons, renderHelp, routeBareEscape, visibleOverlayButtons } from "./tui.js";
 import { canPlaceLatexGraphic, kittyLatexPlacementKey, latexGraphicRenderKey, latexGraphicRowBudget, nativeLatexGraphicCandidates, placeIterm2Frame, shouldApplyGraphicRender } from "./tui.js";
 import { reconcileKittyPlacementsBeforePaint } from "./tui.js";
-import { promptDelivery, sessionHasPendingExecution } from "./tui.js";
+import { promptDelivery, readFeedPreference, sessionHasPendingExecution, writeFeedPreference } from "./tui.js";
 import { navigatePromptCursor, prepareShiftEnterInput } from "./tui.js";
 import { renderLatexGraphic } from "./latex-graphics.js";
 import { renderChartSurface } from "./components/chart.js";
@@ -1323,14 +1323,72 @@ test("styled terminal rows remain bounded by their cell width", () => {
   for (const row of rows) assert.ok(terminalCellWidth(stripAnsi(row)) <= 20, row);
 });
 
-test("board labels preserve USER, HARNESS, and AGENT hierarchy", () => {
+test("raw board labels use Activity and timestamped Agent headers", () => {
   const board = renderPromptBoard({ promptId: "prompt-1", prompt: "hello", events: [event("ToolCalled", { callId: "call-1", name: "fetch_page", argumentsDigest: "digest", arguments: "{}" })], assistant: "answer" }, createTuiInteractionState(), 48);
   const rendered = stripAnsi(board.text);
   assert.equal(stripAnsi(renderConsolePrompt("hello", 48).join("\n")).trimEnd(), "USER > hello");
-  assert.match(rendered, /HARNESS \/\/ TURN 1/);
+  assert.match(rendered, /ACTIVITY/);
   assert.match(rendered, /TOOL fetch_page/);
-  assert.match(rendered, /AGENT \/\/ ASSISTANT/);
+  assert.match(rendered, /AGENT ·/);
+  assert.doesNotMatch(rendered, /AGENT \/\/ ASSISTANT/);
   assert.match(stripAnsi(renderStatusBar("/tmp/project", { inputTokens: 1, outputTokens: 2, contextTokens: 1, contextWindow: 128 }, 80)), /NAVIGATION MODE/);
+});
+
+test("chat-clean TUI mode sanitizes tool rows while raw restores full drawing", () => {
+  const board = {
+    promptId: "prompt-1",
+    prompt: "check status",
+    events: [
+      event("PromptAdmitted", { promptId: "prompt-1", prompt: "check status", delivery: "queue" }, "admit"),
+      event("HarnessThinking", { runId: "run-1", step: "Read /Users/private/file", text: "Inspecting private path" }, "think"),
+      event("ToolCalled", { callId: "call-1", name: "bash", argumentsDigest: "digest", arguments: "private command" }, "tool"),
+      event("ToolFailed", { callId: "call-1", code: "PRIVATE_CODE", message: "private error" }, "failed"),
+    ],
+    assistant: "Done",
+  };
+  const clean = stripAnsi(renderPromptBoard(board, createTuiInteractionState(), 80, 0, "clean").text);
+  const raw = stripAnsi(renderPromptBoard(board, { ...createTuiInteractionState(), expanded: new Set(["intent:think"]) }, 80, 0, "raw").text);
+  const normal = stripAnsi(renderPromptBoard(board, createTuiInteractionState(), 80, 0, "normal").text);
+  const expanded = stripAnsi(renderPromptBoard(board, { ...createTuiInteractionState(), expanded: new Set(["chat-clean:prompt-1"]) }, 80, 0, "clean").text);
+  assert.match(clean, /YOU ·/);
+  assert.match(clean, /◌ Working/);
+  assert.match(clean, /Something went wrong/);
+  assert.doesNotMatch(clean, /private|PRIVATE_CODE|call-1|bash/);
+  assert.match(clean, /1 steps · 1 errors/);
+  assert.match(expanded, /Something went wrong/);
+  assert.doesNotMatch(expanded, /private|PRIVATE_CODE|call-1|bash/);
+  assert.match(normal, /RUN · 1 actions · 1 errors/);
+  assert.match(raw, /ACTIVITY/);
+  assert.match(raw, /AGENT ·/);
+  assert.match(raw, /TOOL bash/);
+  assert.match(raw, /PRIVATE_CODE/);
+});
+
+test("chat-clean TUI feed preference survives reload with a safe default", () => {
+  const directory = mkdtempSync(join(tmpdir(), "finleet-chat-clean-"));
+  const path = join(directory, "chat-clean.json");
+  try {
+    assert.equal(readFeedPreference(path), "clean");
+    writeFeedPreference("normal", path);
+    assert.equal(readFeedPreference(path), "normal");
+    assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), { mod: "chat-clean", mode: "normal" });
+    writeFileSync(path, JSON.stringify({ mod: "unknown", mode: "unexpected" }));
+    assert.equal(readFeedPreference(path), "clean");
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("chat-clean omits the empty Activity panel and compacts turn spacing", () => {
+  const board = { promptId: "prompt-empty", prompt: "hello", events: [], assistant: "Hi there." };
+  const clean = stripAnsi(renderPromptBoard(board, createTuiInteractionState(), 80, 0, "clean").text);
+  const raw = stripAnsi(renderPromptBoard(board, createTuiInteractionState(), 80, 0, "raw").text);
+
+  assert.doesNotMatch(clean, /ACTIVITY|No harness events recorded yet/);
+  assert.match(clean, /YOU ·/);
+  assert.match(clean, /AGENT ·/);
+  assert.match(raw, /No harness events recorded yet/);
+  assert.ok(clean.split("\n").length < raw.split("\n").length);
 });
 
 test("submitted USER prompt is hidden once its durable board is present", () => {
@@ -1695,7 +1753,7 @@ test("assistant canvas projects a chart result over a chart-only assistant marke
     event("ToolSucceeded", { callId: "chart-call", preview: chartResult, truncated: false, result: chartResult, resultTruncated: false }),
   ];
   const rendered = renderPromptBoard({ promptId: "prompt-1", prompt: "show GOOG", events, assistant: "!GOOG chart" }, createTuiInteractionState(), 48).text;
-  const assistant = rendered.slice(rendered.indexOf("AGENT // ASSISTANT"));
+  const assistant = rendered.slice(rendered.indexOf("AGENT ·"));
   assert.equal(assistant.includes("!GOOG chart"), false);
   assert.match(assistant, /▌ FIN/);
   assert.match(assistant, /●/);
@@ -1938,7 +1996,7 @@ test("harness details and mouse parsing stay terminal-safe", () => {
   assert.match(inline.text, /QUERY unavailable/);
   assert.match(inline.text, /RESULT unavailable/);
   assert.match(inline.text, /48;5;235m/);
-  const assistantRow = inline.text.split("\n").findIndex((line) => line.includes("ASSISTANT"));
+  const assistantRow = inline.text.split("\n").findIndex((line) => line.includes("AGENT ·"));
   assert.ok(assistantRow > 0);
   const separator = inline.text.split("\n")[assistantRow - 1] ?? "";
   assert.equal(separator, "");
@@ -2274,9 +2332,9 @@ test("each durable prompt stays immediately above its own turn", () => {
   const second = renderPromptBoard({ promptId: "prompt-2", prompt: "second prompt", events: [], assistant: "" }, createTuiInteractionState(), 48, 1).text;
   const rendered = [...first.split("\n"), ...second.split("\n")].map((line) => stripAnsi(line).trimEnd());
   assert.equal(rendered[0], "USER > first prompt");
-  assert.match(rendered[2] ?? "", /TURN 1/);
+  assert.match(rendered[2] ?? "", /ACTIVITY/);
   const secondPrompt = rendered.findIndex((line) => line === "USER > second prompt");
-  const secondTurn = rendered.findIndex((line) => line.includes("TURN 2"));
+  const secondTurn = rendered.findIndex((line, index) => index > secondPrompt && line.includes("ACTIVITY"));
   assert.ok(secondPrompt >= 0);
   assert.equal(secondTurn, secondPrompt + 2);
 });
@@ -2303,8 +2361,7 @@ test("prompt boards accumulate durable harness events and assistant canvases", (
   assert.equal(boards[0]?.assistant, "first answer continued");
   assert.equal(boards[1]?.assistant, "second answer");
   const history = renderPromptHistory(boards, createTuiInteractionState(), 48, 100);
-  assert.match(history.text, /TURN 1/);
-  assert.match(history.text, /TURN 2/);
+  assert.equal((stripAnsi(history.text).match(/ACTIVITY/g) ?? []).length, 2);
   assert.match(stripAnsi(history.text), /> first prompt/);
   assert.match(stripAnsi(history.text), /> second prompt/);
   assert.match(history.text, /first answer continued/);
@@ -2577,10 +2634,9 @@ test("prompt history scroll keeps old boards and hit rows aligned", () => {
   assert.ok(full.totalRows > 4);
   const scrolledState = scrollHistory(state, "bottom", full.totalRows, 4);
   const scrolled = renderPromptHistory(boards, scrolledState, 36, 4, 3);
-  assert.match(scrolled.text, /TURN 2|ASSISTANT/);
+  assert.match(scrolled.text, /ACTIVITY|AGENT ·/);
   const rendered = renderPromptHistory(boards, scrollHistory(state, "bottom", full.totalRows, 100), 36, 100);
-  assert.match(rendered.text, /TURN 1/);
-  assert.match(rendered.text, /TURN 2/);
+  assert.equal((stripAnsi(rendered.text).match(/ACTIVITY/g) ?? []).length, 2);
   assert.match(stripAnsi(rendered.text), /> old prompt/);
   assert.match(stripAnsi(rendered.text), /> new prompt/);
   assert.ok(scrolled.hitBoxes.every((box) => box.top >= 3));
@@ -2633,7 +2689,7 @@ test("terminal links require safe targets and use rendered hit boxes", async () 
 
 test("only assistant canvas content spans are selectable inside a board", () => {
   const board = renderPromptBoard({ promptId: "prompt-1", prompt: "hello", events: [], assistant: "answer" }, createTuiInteractionState(), 48);
-  const assistantRow = board.text.split("\n").findIndex((line) => line.includes("ASSISTANT"));
+  const assistantRow = board.text.split("\n").findIndex((line) => line.includes("AGENT ·"));
   assert.ok(assistantRow >= 0);
   assert.equal(board.selectableRows[0], true);
   assert.equal(board.selectableRows[1], false);

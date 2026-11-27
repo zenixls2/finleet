@@ -1,4 +1,4 @@
-import { applyConversationEvent, createConversationProjection } from "./conversation.js";
+import { applyConversationEvent, createConversationProjection, formatFeedTime, validFeedMode } from "./conversation.js";
 
 (() => {
   "use strict";
@@ -18,7 +18,7 @@ import { applyConversationEvent, createConversationProjection } from "./conversa
   const prompt = document.querySelector("#prompt");
   const send = document.querySelector("#send");
   const cancel = document.querySelector("#cancel");
-  const MAX_ROWS = 300;
+  const feedSelect = document.querySelector("#feed-mode");
   const seen = new Set();
   const pending = new Map();
   const permissionCards = new Map();
@@ -31,6 +31,10 @@ import { applyConversationEvent, createConversationProjection } from "./conversa
   let eventCount = 0;
   let retry = 0;
   let active = false;
+  let feedMode = localStorage.getItem("finleet.chat-clean.feed") || "clean";
+  if (!validFeedMode(feedMode)) feedMode = "clean";
+  feedSelect.value = feedMode;
+  document.querySelector(".activity-panel").open = feedMode === "raw";
 
   session.textContent = config.sessionId;
   const setConnection = (state, label) => {
@@ -73,7 +77,10 @@ import { applyConversationEvent, createConversationProjection } from "./conversa
       card.className = "conversation-turn";
       const promptLabel = document.createElement("div");
       promptLabel.className = "conversation-label user-label";
-      promptLabel.textContent = "YOU";
+      const promptTime = document.createElement("time");
+      promptTime.dateTime = turn.promptAt;
+      promptTime.textContent = formatFeedTime(turn.promptAt);
+      promptLabel.append("YOU", promptTime);
       const promptText = document.createElement("div");
       promptText.className = "conversation-prompt";
       promptText.textContent = turn.prompt;
@@ -82,16 +89,24 @@ import { applyConversationEvent, createConversationProjection } from "./conversa
       const answerLabel = document.createElement("div");
       answerLabel.className = "conversation-label assistant-label";
       answerLabel.textContent = "FINLEET";
+      const answerTime = document.createElement("time");
+      answerTime.className = "answer-time";
       const status = document.createElement("span");
       status.className = "conversation-status";
       const answer = document.createElement("div");
       answer.className = "conversation-answer";
+      const activity = document.createElement("details");
+      activity.className = "turn-activity";
+      const activitySummary = document.createElement("summary");
+      const activityRows = document.createElement("div");
+      activityRows.className = "turn-activity-rows";
+      activity.append(activitySummary, activityRows);
       const truncated = document.createElement("small");
       truncated.className = "conversation-truncated";
-      answerHeader.append(answerLabel, status);
-      card.append(promptLabel, promptText, answerHeader, answer, truncated);
+      answerHeader.append(answerLabel, answerTime, status);
+      card.append(promptLabel, promptText, answerHeader, answer, activity, truncated);
       conversation.append(card);
-      view = { card, status, answer, truncated };
+      view = { card, status, answer, answerTime, activity, activitySummary, activityRows, truncated };
       conversationViews.set(turn.id, view);
       for (const [id, oldView] of conversationViews) {
         if (!conversationProjection.turns.some((item) => item.id === id)) {
@@ -102,10 +117,28 @@ import { applyConversationEvent, createConversationProjection } from "./conversa
     }
     if (!view) return;
     view.status.textContent = turn.status.toUpperCase();
+    view.answerTime.dateTime = turn.responseAt || turn.promptAt;
+    view.answerTime.textContent = formatFeedTime(turn.responseAt || turn.promptAt);
     view.status.className = `conversation-status ${turn.status}`;
-    view.answer.textContent = turn.response || (turn.status === "completed" ? "No assistant text was returned." : turn.status === "failed" ? turn.error || "The run failed." : "Waiting for response…");
+    view.answer.textContent = turn.response || (turn.status === "completed" ? "No assistant text was returned." : turn.status === "failed" ? feedMode === "raw" ? turn.error || "The run failed." : "Something went wrong. Review the connection or settings, then retry." : "Waiting for response…");
     view.truncated.textContent = turn.truncated ? "Response shortened for display." : "";
-    if (turn.error && turn.response) view.answer.textContent += `\n\n${turn.error}`;
+    view.activity.hidden = turn.activity.length === 0;
+    view.activitySummary.textContent = feedMode === "normal"
+      ? `RUN · ${turn.activity.length} steps · ${turn.activity.filter((item) => item.state === "error").length} errors`
+      : `${turn.activity.length} steps · ${turn.activity.some((item) => item.state === "running") ? "◌ Working" : "show activity"}`;
+    view.activityRows.replaceChildren();
+    for (const item of turn.activity) {
+      const row = document.createElement("div");
+      row.className = `turn-activity-row ${item.state}`;
+      const time = document.createElement("time");
+      time.dateTime = item.at;
+      time.textContent = formatFeedTime(item.at);
+      const label = document.createElement("span");
+      label.textContent = item.state === "error" ? `${formatFeedTime(item.at)} · Something went wrong. ${item.detail}` : item.state === "running" ? "◌ Working" : "Step complete";
+      row.append(time, label);
+      view.activityRows.append(row);
+    }
+    view.activity.open = feedMode === "raw";
   };
   const renderEvent = (event) => {
     if (!event || typeof event.id !== "string" || seen.has(event.id)) return;
@@ -136,7 +169,6 @@ import { applyConversationEvent, createConversationProjection } from "./conversa
     }
     row.append(time, body);
     stream.append(row);
-    while (stream.children.length > MAX_ROWS) stream.firstElementChild?.remove();
     eventCount += 1;
     count.textContent = `${eventCount} EVENTS`;
     if (event.kind === "GraphRunStarted" || event.kind === "ProviderTurnStarted" || event.kind === "ToolCalled") setRunning(true, event.kind === "ToolCalled" ? `Using ${event.data?.name || "tool"}` : "Agent is working");
@@ -241,6 +273,21 @@ import { applyConversationEvent, createConversationProjection } from "./conversa
     event.preventDefault();
     const value = prompt.value.trim();
     if (!value || value.length > 512) return;
+    const feedCommand = /^\/feed(?:\s+(clean|normal|raw))?$/i.exec(value);
+    if (feedCommand) {
+      const requested = (feedCommand[1] || "clean").toLowerCase();
+      feedMode = requested;
+      feedSelect.value = requested;
+      localStorage.setItem("finleet.chat-clean.feed", requested);
+      document.querySelector(".activity-panel").open = requested === "raw";
+      for (const turn of conversationProjection.turns) {
+        const view = conversationViews.get(turn.id);
+        if (view) view.activity.open = requested === "raw";
+      }
+      prompt.value = "";
+      prompt.style.height = "auto";
+      return;
+    }
     prompt.value = "";
     prompt.style.height = "auto";
     send.disabled = true;
@@ -250,6 +297,30 @@ import { applyConversationEvent, createConversationProjection } from "./conversa
       if (result?.exitCode === 2) setRunning(false, failureDetail(result.body));
     } catch (error) { runDetail.textContent = error.message; }
     finally { send.disabled = false; }
+  });
+  feedSelect.addEventListener("change", () => {
+    feedMode = validFeedMode(feedSelect.value) ? feedSelect.value : "clean";
+    localStorage.setItem("finleet.chat-clean.feed", feedMode);
+    document.querySelector(".activity-panel").open = feedMode === "raw";
+    for (const turn of conversationProjection.turns) {
+      const view = conversationViews.get(turn.id);
+      if (view) {
+        view.activity.open = feedMode === "raw";
+        view.activitySummary.textContent = feedMode === "normal" ? `RUN · ${turn.activity.length} steps · ${turn.activity.filter((item) => item.state === "error").length} errors` : `${turn.activity.length} steps · ${turn.activity.some((item) => item.state === "running") ? "◌ Working" : "show activity"}`;
+        for (const [index, row] of [...view.activityRows.children].entries()) {
+          const item = turn.activity[index];
+          const label = row.lastElementChild;
+          if (item && label) label.textContent = feedMode === "normal" ? `Step ${index + 1} ${item.state === "error" ? "needs attention" : item.state === "running" ? "in progress" : "complete"}` : item.state === "error" ? `${formatFeedTime(item.at)} · Something went wrong. ${item.detail}` : item.state === "running" ? "◌ Working" : "Step complete";
+        }
+      }
+    }
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.ctrlKey && event.key.toLowerCase() === "o") {
+      event.preventDefault();
+      const panel = document.querySelector(".activity-panel");
+      panel.open = !panel.open;
+    }
   });
   prompt.addEventListener("input", () => { prompt.style.height = "auto"; prompt.style.height = `${Math.min(prompt.scrollHeight, 110)}px`; });
   prompt.addEventListener("keydown", (event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); form.requestSubmit(); } });

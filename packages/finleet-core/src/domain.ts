@@ -14,7 +14,7 @@ export const digest = (value: string): string => createHash("sha256").update(val
 export const EVENT_SCHEMA_VERSION = 1;
 export const MAX_EVENT_TEXT = 512;
 export const MAX_EVENT_PREVIEW = 256;
-export const MAX_TOOL_RESULT = 16_384;
+export const MAX_TOOL_RESULT = 2 * 1024 * 1024;
 export const MAX_AGENT_OUTPUT = 2048;
 export type BackgroundAgentStatus = "queued" | "running" | "waiting_approval" | "completed" | "failed" | "cancelled" | "recovery_required";
 export type LiveBackgroundAgentStatus = "queued" | "running" | "waiting_approval";
@@ -224,6 +224,13 @@ export function redactJson(value: Json, key = ""): Json {
   if (typeof value === "string") return redactCredentials(value).slice(0, MAX_EVENT_TEXT);
   if (Array.isArray(value)) return value.map((item) => redactJson(item));
   if (value !== null && typeof value === "object") { const result: { [key: string]: Json } = {}; for (const [nestedKey, nested] of Object.entries(value)) result[nestedKey] = redactJson(nested, nestedKey); return result; }
+  return value;
+}
+export function redactToolResult(value: Json, key = ""): Json {
+  if (credentialKey.test(key)) return "[REDACTED]";
+  if (typeof value === "string") return redactCredentials(value);
+  if (Array.isArray(value)) return value.map((item) => redactToolResult(item));
+  if (value !== null && typeof value === "object") { const result: { [key: string]: Json } = {}; for (const [nestedKey, nested] of Object.entries(value)) result[nestedKey] = redactToolResult(nested, nestedKey); return result; }
   return value;
 }
 export function canonicalizePrompt(value: string): string { return redactCredentials(value).slice(0, MAX_EVENT_TEXT); }

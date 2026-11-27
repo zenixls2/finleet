@@ -823,7 +823,7 @@ test("Runner keeps ordinary results at 512 and preserves an opted-in durable res
       ...(durableResultLimit === undefined ? {} : { durableResultLimit }),
       decode: (input) => typeof input === "object" && input !== null && Object.keys(input).length === 0 ? { ok: true, value: {} } : fail("TOOL_ARGUMENT_INVALID", "Expected empty input"),
       authorize: () => ({ ok: true, value: undefined }),
-      execute: () => ({ ok: true, value: { payload: "x".repeat(1_024) } }),
+      execute: () => ({ ok: true, value: { payload: "x".repeat(32_768), api_key: "hidden-secret" } }),
       encode: (value) => value,
     };
     const log = new EventLog(journal());
@@ -843,9 +843,10 @@ test("Runner keeps ordinary results at 512 and preserves an opted-in durable res
   assert.equal(ordinary.data.resultTruncated, true);
   assert.ok((ordinary.data.preview.length) <= MAX_EVENT_PREVIEW);
   const optedIn = await runFor(MAX_TOOL_RESULT);
-  assert.ok((optedIn.data.result?.length ?? 0) > MAX_EVENT_TEXT);
+  assert.ok((optedIn.data.result?.length ?? 0) > 16_384);
   assert.equal(optedIn.data.resultTruncated, false);
   assert.ok(optedIn.data.preview.length <= MAX_EVENT_PREVIEW);
+  assert.equal(JSON.parse(optedIn.data.result ?? "{}").api_key, "[REDACTED]");
 });
 
 class ThreeTurnFetchProvider implements Provider {
@@ -868,9 +869,10 @@ test("local tools may use two bounded continuations before the final answer", as
   let executions = 0;
   const fetchPage: ToolDefinition<{ url: string }, { body: string }> = {
     advertisement: { name: "fetch_page", description: "Fetch a page", inputSchema: { type: "object" } },
+    durableResultLimit: MAX_TOOL_RESULT,
     decode: (input) => typeof input === "object" && input !== null && "url" in input && typeof input.url === "string" ? { ok: true, value: { url: input.url } } : fail("TOOL_ARGUMENT_INVALID", "Invalid fetch request"),
     authorize: () => ({ ok: true, value: undefined }),
-    execute: () => { executions += 1; return { ok: true, value: { body: "page" } }; },
+    execute: () => { executions += 1; return { ok: true, value: { body: `chart-start:${"x".repeat(32_768)}:chart-end` } }; },
     encode: (value) => value,
   };
   const log = new EventLog(journal());
@@ -880,6 +882,7 @@ test("local tools may use two bounded continuations before the final answer", as
   assert.equal(result.ok, true, JSON.stringify(result));
   assert.equal(provider.requests.length, 3);
   assert.equal(executions, 2);
+  assert.match(JSON.stringify(provider.requests[2]?.messages), /chart-end/);
   if (result.ok) assert.match(JSON.stringify(result.value.history), /Latest price/);
 });
 
