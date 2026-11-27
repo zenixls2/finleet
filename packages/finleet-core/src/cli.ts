@@ -91,7 +91,7 @@ const openBrowserUrl = (url: string): Promise<void> => new Promise((resolve, rej
   const launch = process.platform === "darwin" ? { command: "open", args: [url] } : process.platform === "win32" ? { command: "rundll32.exe", args: ["url.dll,FileProtocolHandler", url] } : { command: "xdg-open", args: [url] };
   execFile(launch.command, launch.args, { windowsHide: true }, (error) => error === null ? resolve() : reject(error));
 });
-const tuiServiceArgs = (args: readonly string[]): readonly string[] => [
+export const tuiServiceArgs = (args: readonly string[]): readonly string[] => [
   "exec", "--provider", option(args, "--provider") ?? "openai-responses", "--model", option(args, "--model") ?? "gpt-5.6-luna", "--reasoning-effort", "high", "--exchange", "paper", "--journal", option(args, "--journal") ?? ".finleet/journal.jsonl",
   ...(option(args, "--context-window") === undefined ? [] : ["--context-window", option(args, "--context-window")!]),
   ...(option(args, "--cache") === undefined ? [] : ["--cache", option(args, "--cache")!]),
