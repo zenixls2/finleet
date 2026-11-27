@@ -1,6 +1,6 @@
 # Finleet MVP
 
-#### **Notice: the description is full of AI slope. The only thing that you need to know is how to build and how to run. The Run section should have enough live examples for you to start.**
+#### **Notice: the description is full of AI slop. The only thing that you need to know is how to build and how to run. The Run section should have enough live examples for you to start.**
 
 
 **CURRENT:** Finleet is an npm workspace with three packages. `packages/finleet-core` owns the durable domain/runtime, providers, tools, `CoreService`, authenticated loopback JSON-RPC/WebSocket server, protocol, and headless CLI. `packages/finleet-tui` owns terminal presentation, image/LaTeX/chart rendering, browser helpers, and the native safe-mutate helper. `packages/finleet-web` owns a local browser presentation and a loopback HTTP/WebSocket proxy; both UIs communicate with core through the authenticated no-compression loopback WebSocket boundary.
