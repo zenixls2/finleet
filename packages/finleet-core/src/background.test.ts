@@ -3,9 +3,11 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { backgroundAgentTools, BackgroundAgentScheduler, BACKGROUND_AGENT_PROFILE, type BackgroundAgentHostDriver } from "./background.js";
+import { backgroundAgentTools, BackgroundAgentPool, BackgroundAgentScheduler, BACKGROUND_AGENT_PROFILE, BACKGROUND_LIMITS, type BackgroundAgentHostDriver } from "./background.js";
 import { EventLog, MAX_EVENT_TEXT, materializeReadyBackgroundAgentBatchCallbacks, projectHistory, projectLiveBackgroundAgents, sealBackgroundAgentBatches, type NewEvent, type Permission } from "./domain.js";
 import { ToolRegistry, type PermissionApprover, type Provider, type ProviderEvent, type ProviderRequest } from "./runtime.js";
+import { CODE_PROFILE_ID } from "./code-profile.js";
+import { decodeCodeJobResult } from "./code-job-result.js";
 
 const journal = (): string => join(mkdtempSync(join(tmpdir(), "finleet-background-")), "journal.jsonl");
 const parent = (toolCallId = "spawn-1") => ({ sessionId: "parent", agentId: "paper-agent", assistantMessageId: "run", providerCallId: "turn", toolCallId, permissions: new Set<Permission>(["market:read"]) });
@@ -29,6 +31,101 @@ class DelayedProvider implements Provider {
 }
 
 const scheduler = (log: EventLog, provider: Provider, approver?: PermissionApprover, agentContext = "") => new BackgroundAgentScheduler(log, provider, new ToolRegistry(new Map()), approver, agentContext);
+
+test("spawn advertisement exposes coding profile only for host-enabled schedulers", () => {
+  const log = new EventLog(journal());
+  const provider = new DelayedProvider();
+  const advertisement = (worker: BackgroundAgentScheduler) => backgroundAgentTools(worker).find(([name]) => name === "spawn_agent")?.[1].advertisement;
+  const legacy = advertisement(scheduler(log, provider));
+  assert.deepEqual(legacy, {
+    name: "spawn_agent",
+    description: "Start a bounded read-only background research agent. Omit mode for the legacy immediate agent metadata response; mode 'blocking' waits and returns a terminal envelope; mode 'async' returns a callbackId and durably records a background_agent_callback tool result after the originating spawn result.",
+    inputSchema: { type: "object", properties: { task: { type: "string" }, mode: { type: "string", enum: ["blocking", "async"] } }, required: ["task"] },
+  });
+  const enabled = new BackgroundAgentScheduler(log, provider, new ToolRegistry(new Map()), undefined, "", process.cwd(), undefined, undefined, new BackgroundAgentPool(), true);
+  const advertised = advertisement(enabled);
+  assert.ok(advertised);
+  assert.match(advertised.description, /code-maintenance.*read-only.*cannot execute shell commands/);
+  assert.deepEqual(advertised.inputSchema, {
+    type: "object",
+    properties: {
+      task: { type: "string" },
+      mode: { type: "string", enum: ["blocking", "async"] },
+      profile: { type: "string", enum: [BACKGROUND_AGENT_PROFILE, CODE_PROFILE_ID], description: "Defaults to read-only research; code-maintenance is read-only reference lookup with fresh context" },
+    },
+    required: ["task"],
+  });
+});
+
+test("coding background profile requires host opt-in and fresh context, with only approved reference lookup", async () => {
+  const log = new EventLog(journal());
+  const directory = mkdtempSync(join(tmpdir(), "finleet-code-worker-"));
+  writeFileSync(join(directory, "example.ts"), "export const greeting = 'hello';\n");
+  const requests: ProviderRequest[] = [];
+  const provider: Provider = {
+    providerId: "fake", mode: "fake",
+    async *stream(request) {
+      requests.push(request);
+      if (requests.length === 1) {
+        yield { type: "local_tool_call", callId: "ref", name: "find_references", arguments: { identifier: "greeting" } };
+        yield { type: "finished", finishReason: "tool-calls", usage: { inputTokens: 1, outputTokens: 1 } };
+      } else {
+        yield { type: "text", text: JSON.stringify({ summary: "Found greeting", changedFiles: [], verification: [], remainingIssues: [] }) };
+        yield { type: "finished", finishReason: "stop", usage: { inputTokens: 1, outputTokens: 1 } };
+      }
+    },
+  };
+  const input = { profile: CODE_PROFILE_ID, task: "Find greeting references", mode: "blocking" as const, maxTurns: 2 };
+  assert.equal(scheduler(log, provider).spawn(parent(), input).ok, false);
+  let approvals = 0;
+  const enabled = new BackgroundAgentScheduler(log, provider, new ToolRegistry(new Map()), async () => { approvals++; return { decision: "allow-once" }; }, "parent context must not leak", directory, undefined, undefined, new BackgroundAgentPool(), true);
+  assert.equal(enabled.spawn(parent(), { ...input, contextMode: "parent_snapshot" }).ok, false);
+  const result = await enabled.spawnForTool(parent(), input);
+  assert.ok(result.ok, JSON.stringify(result));
+  assert.ok("mode" in result.value && result.value.mode === "blocking");
+  assert.equal(result.value.agent.status, "completed");
+  assert.ok(decodeCodeJobResult(result.value.terminal).ok);
+  assert.equal(approvals, 1);
+  assert.equal(requests.length, 2);
+  for (const request of requests) {
+    assert.deepEqual(request.tools.map((tool) => tool.name), ["find_references"]);
+    assert.doesNotMatch(request.system, /Market provenance|parent context must not leak/);
+  }
+  const events = log.read();
+  assert.ok(events.ok);
+  assert.ok(events.value.some((event) => event.kind === "ToolSucceeded" && event.data.result?.includes("example.ts")));
+  assert.ok(!events.value.some((event) => event.kind === "ContinuationWindowOpened"));
+});
+
+test("coding background worker uses a total cancellation deadline", async () => {
+  const log = new EventLog(journal());
+  const provider = new DelayedProvider();
+  const enabled = new BackgroundAgentScheduler(log, provider, new ToolRegistry(new Map()), undefined, "", process.cwd(), undefined, undefined, new BackgroundAgentPool(), true);
+  const result = await enabled.spawnForTool(parent(), { profile: CODE_PROFILE_ID, task: "Inspect references", mode: "blocking", timeoutMs: 20 });
+  assert.ok(result.ok && "mode" in result.value && result.value.mode === "blocking");
+  assert.equal(result.value.agent.status, "cancelled");
+});
+
+test("coding background worker cannot open additional continuation windows", async () => {
+  const log = new EventLog(journal());
+  const provider: Provider = {
+    providerId: "fake", mode: "fake",
+    async *stream() {
+      yield { type: "local_tool_call", callId: "ref", name: "find_references", arguments: { identifier: "greeting" } };
+      yield { type: "finished", finishReason: "tool-calls", usage: { inputTokens: 1, outputTokens: 1 } };
+    },
+  };
+  const directory = mkdtempSync(join(tmpdir(), "finleet-code-worker-budget-"));
+  const enabled = new BackgroundAgentScheduler(log, provider, new ToolRegistry(new Map()), async () => ({ decision: "allow-once" }), "", directory, undefined, undefined, new BackgroundAgentPool(), true);
+  const result = await enabled.spawnForTool(parent(), { profile: CODE_PROFILE_ID, task: "Inspect references", mode: "blocking", maxTurns: 1 });
+  assert.ok(result.ok && "mode" in result.value && result.value.mode === "blocking");
+  assert.equal(result.value.terminal.status, "failed");
+  if (result.value.terminal.status === "failed") assert.equal(result.value.terminal.error.code, "PROVIDER_CONTINUATION_DISABLED");
+  const events = log.read();
+  assert.ok(events.ok);
+  assert.equal(events.value.filter((event) => event.kind === "ProviderTurnStarted").length, 1);
+  assert.ok(!events.value.some((event) => event.kind === "ContinuationWindowOpened"));
+});
 
 class RecordingHostDriver implements BackgroundAgentHostDriver {
   readonly deliveries: Array<{ parentSessionId: string; callbackId: string }> = [];
@@ -117,6 +214,50 @@ test("a saturated parent does not block another parent's queued agent", async ()
   assert.equal(control.spawn({ ...parent("other"), sessionId: "other-parent" }, { task: "other" }).ok, true);
   await tick(); assert.equal(provider.started, 3);
   provider.release(); await tick(); await tick(); await tick();
+});
+
+test("shared pool preserves live jobs and original execution context across schedulers", async () => {
+  const log = new EventLog(journal());
+  const pool = new BackgroundAgentPool();
+  const firstProvider = new DelayedProvider();
+  const secondProvider = new DelayedProvider();
+  const first = new BackgroundAgentScheduler(log, firstProvider, new ToolRegistry(new Map()), undefined, "", process.cwd(), undefined, undefined, pool);
+  const second = new BackgroundAgentScheduler(log, secondProvider, new ToolRegistry(new Map()), undefined, "", process.cwd(), undefined, undefined, pool);
+  const a = first.spawn(parent("first"), { task: "first" });
+  const b = first.spawn(parent("second"), { task: "second" });
+  const c = second.spawn(parent("third"), { task: "third" });
+  assert.ok(a.ok && b.ok && c.ok);
+  assert.equal(c.value.status, "queued");
+  const live = second.get("parent", a.value.agentId);
+  assert.ok(live.ok);
+  assert.equal(live.value.status, "running");
+  for (let i = 1; i < BACKGROUND_LIMITS.queued; i++) {
+    assert.equal(first.spawn(parent(`queued-${i}`), { task: "queued" }).ok, true);
+  }
+  assert.equal(second.spawn(parent("overflow"), { task: "overflow" }).ok, false);
+  await tick();
+  assert.equal(firstProvider.started, 2);
+  assert.equal(secondProvider.started, 0);
+  firstProvider.release();
+  await first.wait("parent", a.value.agentId);
+  await tick();
+  assert.equal(secondProvider.started, 1);
+  secondProvider.release();
+  await second.wait("parent", c.value.agentId);
+  const remaining = [...pool.active.values(), ...pool.queue];
+  await Promise.all(remaining.map((agent) => first.wait(agent.parentSessionId, agent.agentId)));
+  assert.equal(pool.active.size, 0);
+  assert.equal(pool.queue.length, 0);
+  for (let i = 0; i < 3; i++) {
+    const job = first.spawn(parent(`extra-${i}`), { task: "extra" });
+    assert.ok(job.ok);
+    await first.wait("parent", job.value.agentId);
+  }
+  assert.equal(pool.settled.size, BACKGROUND_LIMITS.global + BACKGROUND_LIMITS.queued);
+  assert.equal(pool.settled.has(a.value.agentId), false);
+  const restored = second.get("parent", a.value.agentId);
+  assert.ok(restored.ok);
+  assert.equal(restored.value.status, "completed");
 });
 
 test("cancelling an approval-waiting agent releases its slot", async () => {

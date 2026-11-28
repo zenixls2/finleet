@@ -21,7 +21,7 @@ export interface ToolDefinition<I, O> { advertisement: ToolAdvertisement; durabl
 export interface FinanceContext { text: string; provenance: readonly { source: string; asOf: string; digest: string }[]; usedChars: number; budgetChars: number; }
 export interface RunResult { history: readonly HistoryMessage[]; promotedPromptId: string; runId: string; }
 export interface RecordedRunResult extends RunResult { outcome: "finished" | "failed"; }
-export interface RunnerOptions { plan?: GraphPlanDraft; agentId?: string; now?: () => Date; timeZone?: string; }
+export interface RunnerOptions { plan?: GraphPlanDraft; agentId?: string; now?: () => Date; timeZone?: string; contextMode?: "financial" | "nonfinancial"; }
 
 const record = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 export const hasApprovedPermission = (context: ToolContext, requiredPermission: Permission, scope: string): boolean => context.approvedPermission instanceof ApprovalCapability && context.approvedPermission.matches(requiredPermission, scope);
@@ -234,6 +234,10 @@ function pendingContinuation(events: readonly DurableEvent[], sessionId: string)
 }
 
 export class Runner { constructor(private readonly log: EventLog, private readonly provider: Provider, private readonly tools: ToolRegistry, private readonly permissions: ReadonlySet<Permission> = new Set(["market:read", "web:read", "shell:read"]), private readonly coordinator = sharedCoordinator, private readonly leases: SessionLeaseFactory = new FileSessionLeaseFactory(), private readonly agentContext = "", private readonly workingDirectory = process.cwd(), private readonly approver?: PermissionApprover, private readonly signal?: AbortSignal, private readonly options: RunnerOptions = {}) {}
+  private requestContext(): Result<FinanceContext> {
+    if (this.options.contextMode === "nonfinancial") return { ok: true, value: { text: "", provenance: [], usedChars: 0, budgetChars: 0 } };
+    return financeContext(new FixturePaperExchange(), this.permissions, 400);
+  }
   private providerRequest(modelId: string, messages: readonly HistoryMessage[], context: FinanceContext, signal?: AbortSignal): ProviderRequest {
     const stableSystem = [this.agentContext, context.text].filter((value) => value.length > 0).join("\n\n");
     const tools = this.tools.advertised();
@@ -305,7 +309,7 @@ async run(sessionId: string): Promise<Result<RunResult>> {
   return this.executeWindow(sessionId, continuation.plan, continuation.continuationRunId, continuation.inputEventId, admitted.data.promptId, continuation.windowIndex);
 }
  private async executeWindow(sessionId: string, plan: GraphPlan, runId: string, inputEventId: string, promptId: string, windowIndex: number): Promise<Result<ExecutionResult>> {
-   const context = financeContext(new FixturePaperExchange(), this.permissions, 400); if (!context.ok) return this.terminalFailure(sessionId, runId, plan, "context", context.error); const modelId = this.provider.modelId ?? "fake/finleet"; let lastTurn = 0;
+    const context = this.requestContext(); if (!context.ok) return this.terminalFailure(sessionId, runId, plan, "context", context.error); const modelId = this.provider.modelId ?? "fake/finleet"; let lastTurn = 0;
     let pendingToolFailure: FinleetError | undefined;
     let localToolActivityProduced = false;
     for (let turn = 1; turn <= plan.limits.maxTurns; turn += 1) {
@@ -349,7 +353,7 @@ async run(sessionId: string): Promise<Result<RunResult>> {
     for (const event of events) if (event.sessionId === sessionId && event.kind === "BackgroundAgentBatchCallback" && includedBatches.has(event.data.callbackId) && !delivered.has(event.data.callbackId)) this.log.append(sessionId, { kind: "BackgroundAgentBatchCallbackDelivered", data: { batchId: event.data.batchId, callbackId: event.data.callbackId } });
   }
    private async executeBackgroundCallback(sessionId: string, callback: EventOfKind<"BackgroundAgentCallback"> | undefined, batch: EventOfKind<"BackgroundAgentBatchCallback"> | undefined, history: readonly HistoryMessage[]): Promise<Result<void>> {
-    const context = financeContext(new FixturePaperExchange(), this.permissions, 400); if (!context.ok) return context;
+     const context = this.requestContext(); if (!context.ok) return context;
     const modelId = this.provider.modelId ?? "fake/finleet";
      const callbackId = callback?.data.callbackId ?? batch?.data.callbackId;
      if (callbackId === undefined) return fail("BACKGROUND_CALLBACK_MISSING", "Background callback was not found");

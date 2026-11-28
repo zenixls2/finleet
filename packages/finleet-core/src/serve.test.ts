@@ -2,6 +2,25 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { execute, tuiServiceArgs } from "./cli.js";
+
+test("serve preserves default service arguments and forwards existing options", () => {
+  const defaults = tuiServiceArgs([]);
+  assert.deepEqual(defaults, ["exec", "--provider", "openai-responses", "--model", "gpt-5.6-luna", "--reasoning-effort", "high", "--exchange", "paper", "--journal", ".finleet/journal.jsonl"]);
+  assert.deepEqual(tuiServiceArgs(["--provider", "fake", "--journal", "custom.jsonl", "--context-window", "10000", "--cache", "catalog.json", "--auth-file", "auth.json", "--allow-all-permissions"]), [
+    "exec", "--provider", "fake", "--model", "gpt-5.6-luna", "--reasoning-effort", "high", "--exchange", "paper", "--journal", "custom.jsonl",
+    "--context-window", "10000", "--cache", "catalog.json", "--auth-file", "auth.json", "--allow-all-permissions",
+  ]);
+});
+
+test("CLI help exposes native capabilities without feature flags", async () => {
+  for (const command of [["serve"], ["exec"], ["resume"]]) {
+    const help = await execute([...command, "--help"]);
+    assert.equal(help.exitCode, 0);
+    assert.doesNotMatch(String(help.body), /--mode\b|--official-docs\b/);
+    assert.match(String(help.body), /--allow-all-permissions/);
+  }
+});
 
 test("serve prints one bounded loopback handshake and exits on SIGTERM", async () => {
   const child = spawn(process.execPath, [fileURLToPath(new URL("./cli.js", import.meta.url)), "serve"], { stdio: ["ignore", "pipe", "pipe"] });

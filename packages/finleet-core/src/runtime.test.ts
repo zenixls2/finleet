@@ -7,10 +7,56 @@ import { execute } from "./cli.js";
 import { admissionLockPath, digest, EventLog, fail, FileAdmissionLockFactory, FixturePaperExchange, materializeReadyBackgroundAgentBatchCallbacks, MAX_EVENT_PREVIEW, MAX_EVENT_TEXT, MAX_TOOL_RESULT, projectHistory, projectSessions, redactJson, sealBackgroundAgentBatches, type AdmissionLockFactory, type EventOfKind, type GraphPlanDraft, type Permission } from "./domain.js";
 import { defaultPlan, effectiveDurableResultLimit, FakeProvider, FileSessionLeaseFactory, financeContext, formatLocalTimestamp, hasUnsettledGraphRun, publishPlan, quoteTool, recordedRunForAdmission, replay, Runner, sessionLeasePath, splitProviderText, ToolRegistry, type PermissionRequest, type Provider, type ProviderEvent, type ProviderRequest, type ToolDefinition } from "./runtime.js";
 import { RPC_MAX_BYTES } from "./rpc-protocol.js";
+import { REFERENCE_TOOL_NAME, referenceTool } from "./reference-tools.js";
 
 const journal = (): string => join(mkdtempSync(join(tmpdir(), "finleet-")), "journal.jsonl");
 const tools = (): ToolRegistry => new ToolRegistry(new Map([["paper_quote", quoteTool(new FixturePaperExchange())]]));
 const draft = (nodes: GraphPlanDraft["nodes"] = [{ nodeId: "finish", kind: "finish", config: {} }]): GraphPlanDraft => ({ planId: "p", version: 1, sessionScope: "local", entryNode: "finish", activationState: "active", nodes, edges: [], limits: { maxTurns: 1, maxCost: 0, maxParallelism: 1, timeoutMs: 1 } });
+
+test("nonfinancial Runner context supports read-only reference lookup without market permissions", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "finleet-reference-context-"));
+  writeFileSync(join(directory, "example.ts"), "export const greeting = 'hello';\n");
+  const log = new EventLog(journal());
+  assert.ok(log.admit({ sessionId: "code", promptId: "p", prompt: "Find references to greeting", delivery: "queue" }).ok);
+  const requests: ProviderRequest[] = [];
+  const provider: Provider = {
+    providerId: "fake", mode: "fake",
+    async *stream(request) {
+      requests.push(request);
+      if (requests.length === 1) {
+        yield { type: "local_tool_call", callId: "ref", name: REFERENCE_TOOL_NAME, arguments: { identifier: "greeting" } };
+        yield { type: "finished", finishReason: "tool-calls", usage: { inputTokens: 1, outputTokens: 1 } };
+      } else {
+        yield { type: "text", text: "Found the greeting declaration." };
+        yield { type: "finished", finishReason: "stop", usage: { inputTokens: 1, outputTokens: 1 } };
+      }
+    },
+  };
+  const registry = new ToolRegistry(new Map([[REFERENCE_TOOL_NAME, referenceTool()]]));
+  const plan = defaultPlan();
+  const { continuationPolicy: _continuationPolicy, ...limits } = plan.limits;
+  const runner = new Runner(log, provider, registry, new Set(["shell:read"]), undefined, undefined, "Ordinary maintenance", directory, async () => ({ decision: "allow-once" }), undefined, { contextMode: "nonfinancial", plan: { ...plan, limits: { ...limits, maxTurns: 2 } } });
+  const result = await runner.run("code");
+  assert.ok(result.ok, JSON.stringify(result));
+  assert.equal(requests.length, 2);
+  for (const request of requests) {
+    assert.match(request.system, /Ordinary maintenance/);
+    assert.doesNotMatch(request.system, /Market provenance|Account:/);
+    assert.deepEqual(request.tools.map((tool) => tool.name), [REFERENCE_TOOL_NAME]);
+  }
+  const events = log.read();
+  assert.ok(events.ok);
+  assert.ok(events.value.some((event) => event.kind === "ToolSucceeded" && event.data.result?.includes("example.ts")));
+  assert.ok(!events.value.some((event) => event.kind === "ContinuationWindowOpened"));
+});
+
+test("default financial Runner context still requires financial read permissions", async () => {
+  const log = new EventLog(journal());
+  assert.ok(log.admit({ sessionId: "s", promptId: "p", prompt: "hello", delivery: "queue" }).ok);
+  const result = await new Runner(log, new FakeProvider(), tools(), new Set(["shell:read"])).run("s");
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.equal(result.error.code, "CONTEXT_DENIED");
+});
 
 test("versioned events reject malformed payloads and admission retries conflict exactly", () => {
   const path = journal(); writeFileSync(path, `${JSON.stringify({ schemaVersion: 1, id: "x", sessionId: "s", kind: "PromptAdmitted", at: "now", data: { promptId: "p", prompt: 4, delivery: "queue" } })}\n`);

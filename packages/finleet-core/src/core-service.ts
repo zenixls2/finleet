@@ -40,12 +40,16 @@ import { obscuraFetchTool } from "./obscura.js";
 import { bashTool } from "./bash.js";
 import { loadAgentContext } from "./agent-context.js";
 import {
+  BackgroundAgentPool,
   BackgroundAgentScheduler,
   backgroundAgentTools,
   type BackgroundAgentHostDriver,
 } from "./background.js";
 import type { PromptSubmission, RpcPermissionRequest } from "./rpc-protocol.js";
 import { chartTool } from "./components/chart.js";
+import { REFERENCE_TOOL_NAME, referenceTool } from "./reference-tools.js";
+import { DEPENDENCY_REFERENCE_TOOL_NAME, dependencyReferenceTool } from "./dependency-reference-tool.js";
+import { createNpmOfficialDocumentationRetriever, type OfficialDocumentationFetch } from "./official-documentation.js";
 
 export interface ServiceResponse {
   exitCode: 0 | 2;
@@ -61,6 +65,8 @@ export interface CoreServiceOptions {
   workingDirectory?: string;
   signal?: AbortSignal;
   localApprover?: PermissionApprover;
+  /** Optional transport override for version-pinned official npm references. */
+  officialDocumentationFetch?: OfficialDocumentationFetch;
 }
 
 interface PendingPermission {
@@ -117,8 +123,14 @@ export class CoreService {
   private readonly admissionOwners = new Map<string, string>();
   private readonly admissionAgentContexts = new Map<string, string>();
   private readonly catalogService = new ModelCatalogService();
+  private readonly backgroundPool = new BackgroundAgentPool();
+  private readonly references = referenceTool();
+  private readonly dependencyReferences: ReturnType<typeof dependencyReferenceTool>;
 
   constructor(private readonly options: CoreServiceOptions) {
+    this.dependencyReferences = dependencyReferenceTool(
+      { retrieveOfficialDocumentation: createNpmOfficialDocumentationRetriever(options.officialDocumentationFetch ?? globalThis.fetch) },
+    );
     this.log = new EventLog(
       option(options.args, "--journal") ?? ".finleet/journal.jsonl",
       undefined,
@@ -338,6 +350,8 @@ export class CoreService {
     if (!responses && !compatible) {
       entries.push(["paper_quote", quoteTool(new FixturePaperExchange())]);
     }
+    entries.push([REFERENCE_TOOL_NAME, this.references]);
+    entries.push([DEPENDENCY_REFERENCE_TOOL_NAME, this.dependencyReferences]);
 
     const childTools = new ToolRegistry(new Map<string, ToolDefinition<unknown, unknown>>([
       ["paper_quote", quoteTool(new FixturePaperExchange())],
@@ -371,6 +385,8 @@ export class CoreService {
       workingDirectory,
       host,
       (childSessionId) => this.cleanupJobPermissions(owner, childSessionId, undefined, "Background agent ended"),
+      this.backgroundPool,
+      true,
     );
     entries.push(...backgroundAgentTools(scheduler));
     tools = new ToolRegistry(new Map(entries));
